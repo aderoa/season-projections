@@ -160,6 +160,7 @@ select { background:var(--surface); border:1px solid var(--border); border-radiu
 // DATA SOURCES — every URL validated live during development.
 // =====================================================
 const PREDICTIONS_URL = 'https://raw.githubusercontent.com/aderoa/DepthCharts/main/predictions.json';
+const ORDER_URL       = 'https://raw.githubusercontent.com/aderoa/DepthCharts/main/order.json';
 const LFORGE_BASE      = 'https://raw.githubusercontent.com/aderoa/lineup-forge/main/';
 const PLAYER_DB_URL    = LFORGE_BASE + 'player_stats.db.gz';
 const COEFS_URL        = LFORGE_BASE + 'fit_coefficients.json';
@@ -632,6 +633,43 @@ function projectRecord(netrtg) {
 // =====================================================
 let TEAM_RESULTS = [];
 
+async function loadPredictions() {
+  // predictions.json is a derived convenience file that only gets pushed
+  // after a real depth-chart edit in the admin view -- it may not exist
+  // yet on a fresh setup. Fall back to deriving starters/bench directly
+  // from order.json (always populated) using the identical resolution
+  // logic already validated in depthcharts.html, rather than requiring
+  // a throwaway manual edit just to bootstrap the file.
+  try {
+    const r = await fetch(PREDICTIONS_URL + '?t=' + Date.now());
+    if (r.ok) {
+      const text = await r.text();
+      return JSON.parse(text); // throws on a 404 body etc., falls through below
+    }
+  } catch (e) { /* fall through to order.json */ }
+
+  const orderR = await fetch(ORDER_URL + '?t=' + Date.now());
+  if (!orderR.ok) throw new Error(`Neither predictions.json nor order.json could be loaded (order.json: HTTP ${orderR.status})`);
+  const orders = await orderR.json();
+  const cleanName = raw => {
+    if (typeof raw !== 'string') return null;
+    if (raw === '__SEPARATOR__' || raw === '__SPACER__') return null;
+    return raw.indexOf('__DRAFT__:') === 0 ? raw.slice('__DRAFT__:'.length) : raw;
+  };
+  const teams = {};
+  for (const abbr of Object.keys(orders)) {
+    const teamOrder = orders[abbr] || {};
+    const starters = {}, bench = {};
+    for (const pos of POSITIONS_ORDER) {
+      const names = (teamOrder[pos] || []).map(cleanName).filter(Boolean);
+      starters[pos] = names[0] || null;
+      bench[pos] = names.slice(1);
+    }
+    teams[abbr] = { starters, bench };
+  }
+  return { generated_at: new Date().toISOString(), teams, derivedFromOrderJson: true };
+}
+
 async function boot() {
   const grid = document.getElementById('rankGrid');
   const loading = document.getElementById('loading');
@@ -651,7 +689,7 @@ async function boot() {
       fetchDb(PLAYER_DB_URL),
       fetch(COEFS_URL).then(r => r.json()),
       fetch(NAMES_URL).then(r => r.ok ? r.json() : {}).catch(() => ({})),
-      fetch(PREDICTIONS_URL + '?t=' + Date.now()).then(r => r.json()),
+      loadPredictions(),
       fetch(RV_TV_URL).then(r => r.text()),
       loadDefenseData(),
       loadPositionData(),
@@ -661,6 +699,10 @@ async function boot() {
     coefs = coefsJson;
     NAME_DICT = namesJson || {};
     PREDICTIONS = predJson;
+    if (predJson.derivedFromOrderJson) {
+      document.getElementById('errorBox').style.display = 'block';
+      document.getElementById('errorBox').innerHTML = `<div class="error-msg" style="border-color:#fde68a;background:#fffbeb;color:#92400e;"><strong>Note:</strong> predictions.json hasn't been generated yet, so starters were derived directly from order.json instead (same result, just a live fallback). It'll switch to the faster predictions.json automatically the next time an edit is made in Depth Charts.</div>`;
+    }
     DEFENSE = defenseData || {};
     POSITIONS = positionData || {};
 
