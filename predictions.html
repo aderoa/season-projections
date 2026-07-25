@@ -1,0 +1,805 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Season Projections — HoopsMatic</title>
+<link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/sql.js/1.10.3/sql-wasm.min.js"></script>
+<style>
+/* === HOOPSMATIC DESIGN SYSTEM v1.0 === */
+:root {
+  --bg: #f8f9fa; --surface: #fff; --surface2: #f3f4f6;
+  --border: #e2e5e9; --text: #1a1a2e; --text2: #5a6070; --text-muted: #8892a6;
+  --accent: #3b82f6; --accent-dim: rgba(59,130,246,0.07);
+  --accent-gold: #f0b637; --accent-cyan: #0ea5e9;
+  --green: #16a34a; --red: #dc2626; --orange: #f59e0b;
+  --surplus-pos: #10b981; --surplus-neg: #ef4444; --surplus-neutral: #6b7280;
+}
+* { margin:0; padding:0; box-sizing:border-box; }
+body { font-family:'DM Sans',-apple-system,BlinkMacSystemFont,sans-serif; background:var(--bg); color:var(--text); min-height:100vh; line-height:1.5; }
+::-webkit-scrollbar{height:5px;width:5px}::-webkit-scrollbar-track{background:transparent}::-webkit-scrollbar-thumb{background:#d1d5db;border-radius:3px}
+
+.header { background:var(--surface); border-bottom:1px solid var(--border); padding:1.5rem 2rem 1.25rem; }
+.header-inner { max-width:1400px; margin:0 auto; display:flex; align-items:baseline; gap:0.75rem; flex-wrap:wrap; }
+.header h1 { font-weight:800; font-size:1.5rem; letter-spacing:-0.02em; color:var(--text); }
+.header .tag { font-family:'JetBrains Mono',monospace; font-size:0.6rem; color:var(--accent); background:var(--accent-dim); padding:0.2em 0.6em; border-radius:4px; letter-spacing:0.04em; }
+.header-subtitle { color:var(--text2); font-size:0.85rem; width:100%; }
+
+.stats-bar { max-width:1400px; margin:1rem auto 0; padding:0 2rem; display:grid; grid-template-columns:repeat(4,1fr); gap:0.75rem; }
+.stat-card { background:var(--surface); border:1px solid var(--border); border-radius:10px; padding:1rem 1.15rem; }
+.stat-card .label { font-family:'JetBrains Mono',monospace; font-size:0.6rem; text-transform:uppercase; letter-spacing:0.08em; color:var(--text-muted); margin-bottom:0.2rem; }
+.stat-card .value { font-weight:700; font-size:1.35rem; color:var(--text); }
+.stat-card .value .unit { font-size:0.8rem; font-weight:400; color:var(--text2); }
+
+.controls { max-width:1400px; margin:1.25rem auto 0; padding:0 2rem; display:flex; gap:0.75rem; flex-wrap:wrap; align-items:center; }
+.search-box { flex:1; min-width:200px; position:relative; }
+.search-box input { width:100%; background:var(--surface); border:1px solid var(--border); border-radius:8px; padding:0.55rem 0.85rem 0.55rem 2.3rem; color:var(--text); font-family:inherit; font-size:0.85rem; outline:none; transition:border-color 0.2s; }
+.search-box input:focus { border-color:var(--accent); }
+.search-box .icon { position:absolute; left:0.8rem; top:50%; transform:translateY(-50%); color:var(--text-muted); font-size:0.85rem; }
+.filter-group { display:flex; gap:0.5rem; align-items:center; }
+.filter-group label { font-size:0.7rem; color:var(--text-muted); text-transform:uppercase; letter-spacing:0.05em; font-weight:600; }
+select { background:var(--surface); border:1px solid var(--border); border-radius:8px; padding:0.55rem 0.85rem; color:var(--text); font-family:inherit; font-size:0.85rem; outline:none; cursor:pointer; }
+.ctrl-btn { background:var(--surface); border:1px solid var(--border); border-radius:8px; padding:0.5rem 1rem; color:var(--text); font-family:inherit; font-size:0.82rem; font-weight:500; cursor:pointer; transition:border-color 0.15s, background 0.15s; white-space:nowrap; }
+.ctrl-btn:hover:not(:disabled) { border-color:var(--accent); background:var(--accent-dim); }
+.ctrl-btn.active { border-color:var(--accent); background:var(--accent-dim); color:var(--accent); font-weight:600; }
+
+.loading-overlay { text-align:center; padding:4rem 2rem; color:var(--text2); }
+.loading-overlay .spinner { display:inline-block; width:36px; height:36px; border:3px solid var(--border); border-top-color:var(--accent); border-radius:50%; animation:hmSpin 0.8s linear infinite; margin:0 auto 1rem; }
+@keyframes hmSpin { to { transform:rotate(360deg); } }
+.loading-overlay p { color:var(--text2); font-size:0.9rem; margin-top:0.35rem; }
+.error-msg { color:var(--red); max-width:700px; margin:0 auto; text-align:left; background:#fff5f5; border:1px solid #fecaca; border-radius:8px; padding:1rem 1.25rem; font-size:0.82rem; white-space:pre-wrap; }
+
+.footer { max-width:1400px; margin:0 auto; padding:1.5rem 2rem 2.5rem; text-align:center; font-size:0.75rem; color:var(--text-muted); border-top:1px solid var(--border); }
+.footer a { color:var(--accent); text-decoration:none; }
+
+@media(max-width:900px) { .stats-bar{grid-template-columns:repeat(2,1fr);} .controls{flex-direction:column;} .search-box{min-width:100%;} }
+@media(max-width:600px) { .stats-bar{grid-template-columns:1fr 1fr;gap:0.5rem;} .stat-card{padding:0.75rem;} .stat-card .value{font-size:1.1rem;} .header{padding:1.25rem 1rem 1rem;} .header h1{font-size:1.25rem;} }
+
+/* === PAGE-SPECIFIC: projection grid & detail view === */
+.container { max-width:1400px; margin:1.5rem auto 3rem; padding:0 2rem; }
+
+.rank-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(310px,1fr)); gap:0.85rem; margin-top:1.25rem; }
+.team-card { background:var(--surface); border:1px solid var(--border); border-radius:12px; padding:1.1rem 1.2rem; cursor:pointer; transition:border-color 0.15s, transform 0.1s, box-shadow 0.15s; position:relative; }
+.team-card:hover { border-color:var(--accent); transform:translateY(-1px); box-shadow:0 4px 14px rgba(0,0,0,0.06); }
+.team-card .rank { position:absolute; top:1rem; right:1.1rem; font-family:'JetBrains Mono',monospace; font-size:0.7rem; color:var(--text-muted); font-weight:600; }
+.team-card .team-name { font-weight:700; font-size:1.05rem; letter-spacing:-0.01em; margin-bottom:0.15rem; }
+.team-card .stale-flag { display:inline-block; font-size:0.62rem; font-weight:700; color:var(--red); background:rgba(220,38,38,0.08); padding:0.15em 0.5em; border-radius:4px; margin-left:0.4rem; vertical-align:middle; }
+.team-card .starters-line { font-size:0.76rem; color:var(--text2); margin-bottom:0.75rem; line-height:1.4; }
+.team-card .net-row { display:flex; align-items:baseline; gap:0.5rem; margin-bottom:0.5rem; }
+.team-card .net-value { font-weight:800; font-size:1.7rem; letter-spacing:-0.02em; font-family:'JetBrains Mono',monospace; }
+.team-card .net-value.pos { color:var(--green); } .team-card .net-value.neg { color:var(--red); }
+.team-card .net-label { font-size:0.65rem; color:var(--text-muted); text-transform:uppercase; letter-spacing:0.06em; font-weight:600; }
+.team-card .sub-ratings { font-size:0.72rem; color:var(--text-muted); font-family:'JetBrains Mono',monospace; margin-bottom:0.6rem; }
+.chip-row { display:flex; flex-wrap:wrap; gap:0.35rem; }
+.chip { font-size:0.64rem; font-weight:600; padding:0.2em 0.55em; border-radius:5px; white-space:nowrap; }
+.chip.warn { background:rgba(245,158,11,0.1); color:#b45309; }
+.chip.ok { background:rgba(16,163,74,0.08); color:var(--green); }
+.chip.rookie { background:rgba(59,130,246,0.08); color:var(--accent); }
+
+.detail-overlay { display:none; position:fixed; inset:0; background:rgba(26,26,46,0.5); z-index:200; align-items:flex-start; justify-content:center; padding:3rem 1.5rem; overflow-y:auto; }
+.detail-overlay.active { display:flex; }
+.detail-panel { background:var(--surface); border-radius:16px; max-width:720px; width:100%; padding:1.75rem; position:relative; }
+.detail-close { position:absolute; top:1.1rem; right:1.1rem; background:var(--surface2); border:none; border-radius:8px; width:32px; height:32px; cursor:pointer; font-size:1rem; color:var(--text2); }
+.detail-close:hover { background:var(--border); }
+.detail-header h2 { font-size:1.4rem; font-weight:800; letter-spacing:-0.02em; margin-bottom:0.25rem; }
+.detail-header .stale-note { font-size:0.78rem; color:var(--red); background:rgba(220,38,38,0.06); border-left:3px solid var(--red); padding:0.5rem 0.75rem; border-radius:4px; margin:0.6rem 0; }
+.detail-metrics { display:grid; grid-template-columns:repeat(3,1fr); gap:0.6rem; margin:1rem 0 1.25rem; }
+.detail-metrics .m { background:var(--surface2); border-radius:8px; padding:0.7rem 0.85rem; }
+.detail-metrics .m .l { font-size:0.6rem; text-transform:uppercase; letter-spacing:0.06em; color:var(--text-muted); font-weight:600; margin-bottom:0.15rem; }
+.detail-metrics .m .v { font-size:1.25rem; font-weight:700; font-family:'JetBrains Mono',monospace; }
+
+.player-rows { border:1px solid var(--border); border-radius:10px; overflow:hidden; margin-bottom:1.1rem; }
+.player-row { display:grid; grid-template-columns:2.4rem 1fr auto auto; gap:0.7rem; align-items:center; padding:0.6rem 0.85rem; border-bottom:1px solid var(--border); font-size:0.82rem; }
+.player-row:last-child { border-bottom:none; }
+.player-row .pos { font-family:'JetBrains Mono',monospace; font-size:0.68rem; color:var(--text-muted); font-weight:700; }
+.player-row .pname { font-weight:600; }
+.player-row .pname .sub { display:block; font-weight:400; font-size:0.7rem; color:var(--text-muted); }
+.player-row .prating { font-family:'JetBrains Mono',monospace; font-size:0.78rem; text-align:right; }
+.player-row .pcontrib { font-family:'JetBrains Mono',monospace; font-size:0.72rem; color:var(--text-muted); text-align:right; min-width:5.5rem; }
+
+.section-label { font-size:0.68rem; text-transform:uppercase; letter-spacing:0.07em; color:var(--text-muted); font-weight:700; margin:0.9rem 0 0.5rem; }
+.note-list { font-size:0.8rem; color:var(--text2); }
+.note-list div { padding:0.3rem 0; border-bottom:1px solid var(--border); }
+.note-list div:last-child { border-bottom:none; }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <div class="header-inner">
+    <h1>Season Projections</h1>
+    <span class="tag">v1 — starting five</span>
+    <div class="header-subtitle">Live starting-five NetRtg projections, built from Depth Charts, RealValue ratings, and Lineup Forge's composition model.</div>
+  </div>
+</div>
+
+<div class="stats-bar" id="statsBar" style="display:none;">
+  <div class="stat-card"><div class="label">Teams Projected</div><div class="value" id="statTeams">—</div></div>
+  <div class="stat-card"><div class="label">Best Projected NetRtg</div><div class="value" id="statBest">—</div></div>
+  <div class="stat-card"><div class="label">League Avg NetRtg</div><div class="value" id="statAvg">—</div></div>
+  <div class="stat-card"><div class="label">Live DEF_SCORE</div><div class="value" id="statDef">—</div></div>
+</div>
+
+<div class="controls" id="controls" style="display:none;">
+  <div class="search-box">
+    <span class="icon">🔍</span>
+    <input type="text" id="searchInput" placeholder="Search team or player...">
+  </div>
+  <div class="filter-group">
+    <label>Sort</label>
+    <select id="sortSelect">
+      <option value="net">Projected NetRtg</option>
+      <option value="ortg">Projected ORtg</option>
+      <option value="drtg">Projected DRtg</option>
+      <option value="az">Team A–Z</option>
+    </select>
+  </div>
+  <button class="ctrl-btn" id="refreshBtn" onclick="boot()">↻ Refresh</button>
+</div>
+
+<div class="container">
+  <div id="loading" class="loading-overlay">
+    <div class="spinner"></div>
+    <p id="loadingStatus">Loading live data...</p>
+  </div>
+  <div id="errorBox" style="display:none;"></div>
+  <div class="rank-grid" id="rankGrid"></div>
+</div>
+
+<div class="footer">
+  Data: <a href="https://hoopsmatic.com" target="_blank">HoopsMatic</a> Depth Charts, RealValue &amp; Lineup Forge. Projections are a model, not a guarantee — treat as directional.
+</div>
+
+<div class="detail-overlay" id="detailOverlay" onclick="if(event.target===this) closeDetail()">
+  <div class="detail-panel" id="detailPanel"></div>
+</div>
+
+<script>
+// =====================================================
+// DATA SOURCES — every URL validated live during development.
+// =====================================================
+const PREDICTIONS_URL = 'https://raw.githubusercontent.com/aderoa/DepthCharts/main/predictions.json';
+const LFORGE_BASE      = 'https://raw.githubusercontent.com/aderoa/lineup-forge/main/';
+const PLAYER_DB_URL    = LFORGE_BASE + 'player_stats.db.gz';
+const COEFS_URL        = LFORGE_BASE + 'fit_coefficients.json';
+const NAMES_URL        = LFORGE_BASE + 'name_dictionary.json';
+
+const RV_TV_URL        = 'https://hoopsmatic.com/api/rm-tv';
+const DEF_CACHE_URL    = 'https://hoopsmatic.com/api/defense-cache';
+
+const DEF_API_KEY      = 'AIzaSyB9g7c6llswswuZQ2I5y2MwGk6BzYEtHsY';
+const DEF_SHEET_ID     = '1JH2FUBIyQ1zEHzZBxgP8vHBZ7d8EtP5-fSVG3zMgCgg';
+const DEF_URL          = `https://sheets.googleapis.com/v4/spreadsheets/${DEF_SHEET_ID}/values/Defensive_Rankings?key=${DEF_API_KEY}`;
+const POS_SHEET_ID     = '11llk0icQqoi0JwJXat5KO8y2RQeBMN5rS9FhAY56Idc';
+const POS_URL          = `https://sheets.googleapis.com/v4/spreadsheets/${POS_SHEET_ID}/values:batchGet?ranges=Sheet2!S:S&ranges=Sheet2!AG:AG&key=${DEF_API_KEY}`;
+
+// =====================================================
+// CONSTANTS — ported verbatim from Lineup Forge's real projectLineup()
+// and RealValue's real age-multiplier logic. Every constant here was
+// pulled directly from the deployed source, not re-derived.
+// =====================================================
+const USG_HIGH = 0.25, SHOOT_OK = 0.35, SHOOT_MIN_3PA = 2.0;
+const AST_HIGH = 0.20, REB_HIGH = 0.10, BLK_HIGH = 1.0;
+const OFF_CALIB = 12, OFF_SCALE = 0.25;
+const DEF_CALIB = 10, DEF_SCALE = 0.18;
+const DEF_TO_RAT_FACTOR = 0.5;
+const LEAGUE_BASE = 115;
+const FIT_WEIGHT = 0.35;
+const BOOST_GP_FULL = 40, BOOST_GP_NONE = 50;
+const COMP_BLK = 5, COMP_STL = 5, COMP_DREB = 40;
+const RECENCY_DECAY = 0.65;
+const MIN_SEASON_GP = 5;
+const PIE_SHIFT = 7.68, PIE_SCALE = 2.03, PIE_DERIVED_CAP = 35;
+const TOTAL_USG_TARGET = 1.0;
+const USG_TS_SLOPE = -0.6, TS_EFFICIENCY_FACTOR = 0.03;
+const CURRENT_SEASON = '2025-26';
+
+// RealValue's exact age-multiplier constants. Lineup Forge has NO age
+// mechanism of its own (confirmed by reading its source directly) --
+// this is layered on top of the watermark separately, same as the
+// validated Haliburton/Lillard test earlier in this build.
+const AGE_MAX_BONUS = 0.85, OLD_THRESHOLD = 35, OLD_PENALTY_PER_YEAR = 0.03, OLD_FLOOR = 0.50;
+const MAX_DEV_YOUNG = 8, YOUTH_EXP_DECAY = 0.45, YOUTH_EXP_FLOOR = 0.30;
+
+// Rookie handling: no NBA track record exists to compute a watermark from,
+// so rookies get a simple age+draft-position value curve instead, and are
+// EXCLUDED from all five Layer-2 dimensional buckets entirely (no real
+// stat profile to classify them by -- better to be silent than to guess).
+// This is a clearly-flagged heuristic, not derived from real rookie
+// performance-by-slot data (that data isn't available yet this session).
+const ROOKIE_BASE_RATING = 6.0;   // a purely average NBA-rotation player
+const ROOKIE_DRAFT_DECAY = 0.045; // rating falls off with later draft position
+
+const POSITIONS_ORDER = ['PG','SG','SF','PF','C'];
+const TODAY = new Date('2026-07-25'); // matches this session's live-data snapshots
+
+let playerDb = null, coefs = null, NAME_DICT = {}, POSITIONS = {}, DEFENSE = {};
+let LIVE_RATINGS = {}; // HH name -> {rat365, birthday, draftPos}
+let PREDICTIONS = null;
+
+// =====================================================
+// DATA LOADING
+// =====================================================
+async function fetchDb(url) {
+  const r = await fetch(url);
+  if (!r.ok) throw new Error(`HTTP ${r.status} fetching ${url}`);
+  if (url.endsWith('.gz')) {
+    const ds = new DecompressionStream('gzip');
+    return await new Response(r.body.pipeThrough(ds)).arrayBuffer();
+  }
+  return await r.arrayBuffer();
+}
+
+// Parses rm-tv's CSV. Two independent logical tables share the same rows:
+// columns 0-4 are the current roster (TEAM, PLAYER, RAT365, SALARY,
+// BIRTHDAY); columns 6-9 are an UNRELATED historical stream (YEAR, PLAYER,
+// TOTAL_RAT, G) -- one record per row, not tied to that row's own player.
+// Column 19 is EXP, column 20 is DRAFT position. This dual-table shape
+// was reverse-engineered directly from RealValue's own parsing code.
+function parseCSVLine(line) {
+  const out = []; let cur = '', inQ = false;
+  for (let i = 0; i < line.length; i++) {
+    const c = line[i];
+    if (inQ) {
+      if (c === '"' && line[i+1] === '"') { cur += '"'; i++; }
+      else if (c === '"') inQ = false;
+      else cur += c;
+    } else {
+      if (c === '"') inQ = true;
+      else if (c === ',') { out.push(cur); cur = ''; }
+      else cur += c;
+    }
+  }
+  out.push(cur);
+  return out;
+}
+
+function parseRmTv(text) {
+  const lines = text.split(/\r?\n/).filter(l => l.trim());
+  const roster = {};      // HH name -> {rat365, birthday, draftPos, team}
+  const historical = [];  // {year, player, totalRat, games}
+  for (let i = 1; i < lines.length; i++) {
+    const row = parseCSVLine(lines[i]);
+    if (row[0] && row[1]) {
+      roster[row[1].trim()] = {
+        rat365: parseFloat(row[2]) || 0,
+        birthday: row[4] || '',
+        draftPos: parseInt(row[20]) || null,
+        team: row[0].trim(),
+      };
+    }
+    if (row[6] && row[7]) {
+      const g = parseInt(row[9]) || 0;
+      if (g > 0) historical.push({ year: row[6], player: row[7].trim(), totalRat: parseFloat((row[8]||'0').replace(/,/g,'')) || 0, games: g });
+    }
+  }
+  return { roster, historical };
+}
+
+async function loadDefenseData() {
+  // Prefer the fast defense-cache endpoint; fall back to the live sheet
+  // directly if the cache is still empty (e.g. worker.js fix not deployed
+  // yet). Both paths were validated directly during this build.
+  try {
+    const cacheR = await fetch(DEF_CACHE_URL);
+    if (cacheR.ok) {
+      const cacheJson = await cacheR.json();
+      if (cacheJson && Object.keys(cacheJson).length > 0) {
+        // defense-cache stores {name: SC_MPG}, not the full DEF_SCORE row --
+        // this shape only carries score, which is all this tool needs.
+        const result = {};
+        for (const [name, score] of Object.entries(cacheJson)) result[name] = { def_score: score };
+        return result;
+      }
+    }
+  } catch (e) { /* fall through */ }
+  try {
+    const res = await fetch(DEF_URL);
+    if (!res.ok) return {};
+    const data = await res.json();
+    const rows = data.values || [];
+    let headerIdx = -1;
+    for (let i = 0; i < Math.min(rows.length, 5); i++) {
+      const u = (rows[i][0] || '').toUpperCase();
+      if (u === 'PLAYER') { headerIdx = i; break; }
+    }
+    if (headerIdx === -1) return {};
+    const headers = rows[headerIdx];
+    const idx = {};
+    headers.forEach((h, i) => { idx[(h||'').trim().toUpperCase()] = i; });
+    if (idx.PLAYER === undefined || idx.DEF_SCORE === undefined) return {};
+    const result = {};
+    for (let i = headerIdx + 1; i < rows.length; i++) {
+      const row = rows[i];
+      const name = (row[idx.PLAYER] || '').trim();
+      const score = parseFloat(row[idx.DEF_SCORE]);
+      if (name && !isNaN(score)) result[name] = { def_score: score };
+    }
+    return result;
+  } catch (e) { return {}; }
+}
+
+async function loadPositionData() {
+  try {
+    const res = await fetch(POS_URL);
+    if (!res.ok) return {};
+    const data = await res.json();
+    const ranges = data.valueRanges || [];
+    if (ranges.length !== 2) return {};
+    const players = ranges[0].values || [];
+    const positions = ranges[1].values || [];
+    const result = {};
+    for (let i = 1; i < players.length; i++) {
+      const name = (players[i]?.[0] || '').trim();
+      const pos = (positions[i]?.[0] || '').trim();
+      if (name && pos) result[name] = pos;
+    }
+    return result;
+  } catch (e) { return {}; }
+}
+
+// =====================================================
+// QUALITY COMPUTATION — faithful port of Lineup Forge's
+// computeWeightedRat365 / getQuality, with RealValue's ageMult layered
+// on top (Lineup Forge has no age mechanism of its own).
+// =====================================================
+function seasonStartYear(s) { return parseInt(String(s).slice(0,4), 10); }
+function pieToRat365(pie) { const p = pie*100; return Math.min(PIE_DERIVED_CAP, Math.max(0, (p-PIE_SHIFT)*PIE_SCALE)); }
+function boostFraction(gp) {
+  if (gp >= BOOST_GP_NONE) return 0;
+  if (gp <= BOOST_GP_FULL) return 1;
+  return (BOOST_GP_NONE - gp) / (BOOST_GP_NONE - BOOST_GP_FULL);
+}
+function ageFromBirthday(bday) {
+  if (!bday) return null;
+  const parts = bday.split('/');
+  if (parts.length !== 3) return null;
+  const d = new Date(+parts[2], +parts[0]-1, +parts[1]);
+  return (TODAY - d) / (365.25 * 864e5);
+}
+function ageMult(age, avgAge, expYears) {
+  if (age === null) return 1.0;
+  if (age < avgAge) {
+    const yf = YOUTH_EXP_FLOOR + (1-YOUTH_EXP_FLOOR) * Math.exp(-YOUTH_EXP_DECAY*expYears);
+    return 1.0 + AGE_MAX_BONUS * yf * (avgAge - age) / MAX_DEV_YOUNG;
+  } else if (age >= OLD_THRESHOLD) {
+    return Math.max(OLD_FLOOR, 1.0 - OLD_PENALTY_PER_YEAR*(age-OLD_THRESHOLD));
+  }
+  return 1.0;
+}
+
+let AVG_AGE = 28.4; // recomputed from live data once loaded
+
+function nbaToHH(nbaName) { return NAME_DICT[nbaName] || nbaName; }
+function hhToNba(hhName) {
+  for (const [k,v] of Object.entries(NAME_DICT)) if (v === hhName) return k;
+  return hhName;
+}
+
+function computeWeightedRat365(hhName) {
+  const nbaName = hhToNba(hhName);
+  const live = LIVE_RATINGS[hhName];
+  const currentRat365 = live ? live.rat365 : null;
+  const stmt = playerDb.prepare(`SELECT SEASON, CAST(GP AS INTEGER) as GP, CAST(PIE AS REAL) as PIE
+    FROM player_advanced WHERE PLAYER_NAME=? AND SEASON_TYPE='Regular Season' AND CAST(GP AS INTEGER)>=?
+    ORDER BY SEASON DESC`);
+  stmt.bind([nbaName, MIN_SEASON_GP]);
+  const rows = [];
+  while (stmt.step()) rows.push(stmt.getAsObject());
+  stmt.free();
+  if (!rows.length && currentRat365 === null) return null;
+
+  const curYear = seasonStartYear(CURRENT_SEASON);
+  let tw = 0, twt = 0, curGP = 0;
+  for (const r of rows) {
+    const yd = curYear - seasonStartYear(r.SEASON);
+    if (yd < 0) continue;
+    const w = r.GP * Math.pow(RECENCY_DECAY, yd);
+    let rat;
+    if (r.SEASON === CURRENT_SEASON && currentRat365 !== null) rat = currentRat365;
+    else rat = pieToRat365(r.PIE);
+    tw += rat*w; twt += w;
+    if (r.SEASON === CURRENT_SEASON) curGP = r.GP;
+  }
+  if (twt === 0) return currentRat365 !== null ? { effective: currentRat365, currentGP: 0 } : null;
+  const blended = tw/twt;
+  let effective;
+  if (currentRat365 === null) effective = blended;
+  else if (blended > currentRat365) effective = currentRat365 + boostFraction(curGP)*(blended-currentRat365);
+  else effective = currentRat365;
+  return { effective, blended, currentRat365, currentGP: curGP };
+}
+
+function boxScoreDefComposite(blk, stl, drebPct) { return COMP_BLK*(blk||0) + COMP_STL*(stl||0) + COMP_DREB*(drebPct||0); }
+
+function computeWeightedDefScore(hhName) {
+  // Prefer real live DEF_SCORE (validated directly against the live sheet
+  // during this build); fall back to the box-score composite -- Lineup
+  // Forge's own designed fallback, explicitly documented there as "roughly
+  // approximate," not a precise substitute.
+  const live = DEFENSE[hhName];
+  if (live && live.def_score != null) return { effective: live.def_score, source: 'live' };
+
+  const nbaName = hhToNba(hhName);
+  const stmt = playerDb.prepare(`SELECT a.SEASON, CAST(a.GP AS INTEGER) as GP, CAST(a.DREB_PCT AS REAL) as DREB_PCT,
+      CAST(b.BLK AS REAL) as BLK, CAST(b.STL AS REAL) as STL
+    FROM player_advanced a LEFT JOIN player_base b
+      ON a.PLAYER_NAME=b.PLAYER_NAME AND a.SEASON=b.SEASON AND a.SEASON_TYPE=b.SEASON_TYPE
+    WHERE a.PLAYER_NAME=? AND a.SEASON_TYPE='Regular Season' AND CAST(a.GP AS INTEGER)>=?
+    ORDER BY a.SEASON DESC`);
+  stmt.bind([nbaName, MIN_SEASON_GP]);
+  const rows = [];
+  while (stmt.step()) rows.push(stmt.getAsObject());
+  stmt.free();
+  if (!rows.length) return null;
+  const curYear = seasonStartYear(CURRENT_SEASON);
+  let tw = 0, twt = 0;
+  for (const r of rows) {
+    const yd = curYear - seasonStartYear(r.SEASON);
+    if (yd < 0) continue;
+    const w = r.GP * Math.pow(RECENCY_DECAY, yd);
+    tw += boxScoreDefComposite(r.BLK, r.STL, r.DREB_PCT) * w; twt += w;
+  }
+  if (twt === 0) return null;
+  return { effective: tw/twt, source: 'box-score-approx' };
+}
+
+function getStats2526(hhName) {
+  const nbaName = hhToNba(hhName);
+  const stmt = playerDb.prepare(`SELECT a.USG_PCT, a.AST_PCT, a.REB_PCT, b.FG3_PCT, b.FG3A, b.BLK
+    FROM player_advanced a JOIN player_base b
+      ON a.PLAYER_NAME=b.PLAYER_NAME AND a.SEASON=b.SEASON AND a.SEASON_TYPE=b.SEASON_TYPE
+    WHERE a.PLAYER_NAME=? AND a.SEASON='2025-26' AND a.SEASON_TYPE='Regular Season' LIMIT 1`);
+  stmt.bind([nbaName]);
+  let row = null;
+  if (stmt.step()) row = stmt.getAsObject();
+  stmt.free();
+  if (!row) return null;
+  return { usg: row.USG_PCT||0, ast_pct: row.AST_PCT||0, reb_pct: row.REB_PCT||0, fg3p: row.FG3_PCT||0, fg3a: row.FG3A||0, blk: row.BLK||0 };
+}
+
+// Rookie handling: neutral value from age + draft position, and (in
+// project_lineup) excluded from every Layer-2 dimensional bucket --
+// no real stat profile exists to classify them by.
+function rookieRating(draftPos) {
+  const dp = draftPos && draftPos > 0 ? draftPos : 45; // undrafted assumption: replacement-level
+  return Math.max(2.0, ROOKIE_BASE_RATING * Math.exp(-ROOKIE_DRAFT_DECAY * (dp-1)));
+}
+
+function getQuality(hhName) {
+  const w = computeWeightedRat365(hhName);
+  const live = LIVE_RATINGS[hhName];
+  const isRookie = !w && live; // has a live roster entry but zero NBA history
+  let rawRat365, age, isRookieFlag = false;
+  if (w) {
+    rawRat365 = w.effective;
+  } else if (isRookie) {
+    rawRat365 = rookieRating(live.draftPos);
+    isRookieFlag = true;
+  } else {
+    return null;
+  }
+  const bday = live ? live.birthday : null;
+  age = ageFromBirthday(bday);
+  let rat365 = rawRat365;
+  let am = 1.0;
+  if (age !== null && !isRookieFlag) {
+    const expApprox = Math.max(1, Math.floor(age - 19));
+    am = ageMult(age, AVG_AGE, expApprox);
+    rat365 = rawRat365 * am;
+  }
+  return { hh_name: hhName, rat365, age, ageMult: am, rawWatermark: rawRat365, isRookie: isRookieFlag };
+}
+
+function getDefenseQuality(hhName) {
+  const d = computeWeightedDefScore(hhName);
+  if (!d) return null;
+  return { def_score: d.effective, source: d.source };
+}
+
+// =====================================================
+// LINEUP-LEVEL LOGIC — normalizeLineupUsages, tsEfficiencyBonus,
+// viabilityAdjustments, projectLineup. Ported verbatim from
+// Lineup Forge's real source, including the oBase/dBase centering that
+// was the actual double-counting bug found and fixed during this build.
+// =====================================================
+function normalizeLineupUsages(players) {
+  const total = players.reduce((s,p) => s + (p.usg||0), 0);
+  if (total <= 0.01) return players.map(p => ({...p, usg_norm:0.2, ts_delta_pp:0}));
+  const scale = TOTAL_USG_TARGET / total;
+  return players.map(p => {
+    const usgNorm = (p.usg||0) * scale;
+    const usgDeltaPp = (usgNorm - (p.usg||0)) * 100;
+    const tsDeltaPp = -USG_TS_SLOPE * usgDeltaPp;
+    return {...p, usg_norm: usgNorm, ts_delta_pp: tsDeltaPp};
+  });
+}
+function tsEfficiencyBonus(normalized) { return normalized.reduce((s,p) => s + (p.ts_delta_pp||0)*TS_EFFICIENCY_FACTOR, 0); }
+
+function viabilityAdjustments(players, positions) {
+  let ortgPen = 0, drtgPen = 0; const notes = [];
+  const hasRim = players.some(p => (p.blk||0) >= 1.0);
+  const hasBigBody = players.some(p => (p.reb_pct||0) >= 0.15);
+  if (!hasRim && !hasBigBody) { drtgPen += 7.0; notes.push('No rim protection or size'); }
+  else if (!hasRim) { drtgPen += 2.0; notes.push('Thin rim protection'); }
+
+  const trueBigs = positions.filter(p => p==='PF'||p==='C').length;
+  const nonPgs = players.filter((p,i) => positions[i] !== 'PG');
+  const sumReb = (nonPgs.length >= 3 ? nonPgs : players).reduce((s,p) => s+(p.reb_pct||0), 0);
+  if (trueBigs >= 2) {
+    if (sumReb < 0.28) { drtgPen += 1.0; ortgPen += 0.5; notes.push('Limited rebounding'); }
+  } else {
+    const tinyT = nonPgs.length >= 3 ? 0.28 : 0.35;
+    const smallT = nonPgs.length >= 3 ? 0.40 : 0.50;
+    if (sumReb < tinyT) { drtgPen += 3.0; ortgPen += 1.5; notes.push('Tiny lineup'); }
+    else if (sumReb < smallT) { drtgPen += 1.0; ortgPen += 0.5; notes.push('Undersized'); }
+  }
+
+  const handlers = players.filter(p => (p.ast_pct||0) >= AST_HIGH).length;
+  if (handlers >= 5) { ortgPen += 3.0; notes.push('All-handler lineup'); }
+  else if (handlers >= 4) { ortgPen += 1.5; notes.push('Handler stacking'); }
+  if (handlers === 0) { ortgPen += 3.0; notes.push('No primary creator'); }
+  else if (handlers === 1) { ortgPen += 0.7; notes.push('Thin creation'); }
+
+  const shooters = players.filter(p => p.fg3p >= SHOOT_OK && p.fg3a >= SHOOT_MIN_3PA).length;
+  if (shooters === 0) { ortgPen += 3.0; notes.push('No spacing'); }
+  else if (shooters === 1) { ortgPen += 1.0; notes.push('Thin spacing'); }
+
+  const bigs = players.filter((p,i) => positions[i]==='PF'||positions[i]==='C');
+  const isSpacingThreat = p => (p.fg3p>=SHOOT_OK && p.fg3a>=SHOOT_MIN_3PA) || p.fg3a>=3.0;
+  const nonSpacingBigs = bigs.filter(p => !isSpacingThreat(p));
+  if (bigs.length >= 2 && nonSpacingBigs.length >= 2) { ortgPen += 1.5; notes.push('Non-shooting frontcourt'); }
+
+  const hasFocal = players.some(p => (p.rat365||0) >= 20);
+  if (!hasFocal) { ortgPen += 1.5; notes.push('No offensive focal point'); }
+
+  return { ortgPen, drtgPen, notes };
+}
+
+function projectLineup(names, positions) {
+  const quality = [];
+  for (const n of names) {
+    const q = getQuality(n);
+    if (!q) return { error: `no data for ${n}` };
+    const d = q.isRookie ? null : getDefenseQuality(n);
+    const defScore = d ? d.def_score : null;
+    const defContrib = defScore !== null ? (defScore - DEF_CALIB) * DEF_SCALE : 0;
+    const defAboveAvg = (defScore !== null ? defScore : DEF_CALIB) - DEF_CALIB;
+    const offRat = q.rat365 - defAboveAvg * DEF_TO_RAT_FACTOR;
+    const offContrib = (offRat - OFF_CALIB) * OFF_SCALE;
+    quality.push({...q, def_score: defScore, def_contrib: defContrib, off_contrib: offContrib});
+  }
+  const totalOff = quality.reduce((s,q) => s+q.off_contrib, 0);
+  const totalDef = quality.reduce((s,q) => s+q.def_contrib, 0);
+
+  const stats = [];
+  for (let i = 0; i < names.length; i++) {
+    if (quality[i].isRookie) { stats.push({usg:0, ast_pct:0, reb_pct:0, fg3p:0, fg3a:0, blk:0, rat365:quality[i].rat365, isRookie:true}); continue; }
+    const s = getStats2526(names[i]);
+    if (!s) return { error: `no 2025-26 stats for ${names[i]}` };
+    stats.push({...s, rat365: quality[i].rat365, isRookie:false});
+  }
+
+  const oBase = coefs.meta.baseline_ortg_resid_mean || 0;
+  const dBase = coefs.meta.baseline_drtg_resid_mean || 0;
+  // Rookies are excluded from every dimensional bucket count -- no real
+  // stat profile exists to classify them by (see rookieRating comment).
+  const nonRookieStats = stats.filter(s => !s.isRookie);
+  const normalized = normalizeLineupUsages(nonRookieStats);
+  const dims = [
+    ['n_high_usg', normalized.filter(p => p.usg_norm >= USG_HIGH).length],
+    ['n_shooters', nonRookieStats.filter(p => p.fg3p >= SHOOT_OK && p.fg3a >= SHOOT_MIN_3PA).length],
+    ['n_rim_protect', nonRookieStats.filter(p => p.blk >= BLK_HIGH).length],
+    ['n_playmakers', nonRookieStats.filter(p => p.ast_pct >= AST_HIGH).length],
+    ['n_rebounders', nonRookieStats.filter(p => p.reb_pct >= REB_HIGH).length],
+  ];
+  let ortgAdj = 0, drtgAdj = 0;
+  for (const [key, value] of dims) {
+    const dim = coefs.dimensions[key];
+    const bucket = dim ? dim.buckets[String(value)] : null;
+    if (!bucket) continue;
+    ortgAdj += (bucket.ortg_adj - oBase) * FIT_WEIGHT;
+    drtgAdj += (bucket.drtg_adj - dBase) * FIT_WEIGHT;
+  }
+  const fitNet = ortgAdj - drtgAdj;
+  const tsBonus = tsEfficiencyBonus(normalized);
+  const via = viabilityAdjustments(stats, positions);
+
+  const displayOrtg = LEAGUE_BASE + totalOff + ortgAdj;
+  const displayDrtg = LEAGUE_BASE - totalDef + drtgAdj;
+  const ortg = displayOrtg + tsBonus - via.ortgPen;
+  const drtg = displayDrtg + via.drtgPen;
+  const netrtg = (totalOff + totalDef) + fitNet + tsBonus - via.ortgPen - via.drtgPen;
+
+  return { quality, totalOff, totalDef, ortgAdj, drtgAdj, tsBonus, viability: via,
+    ortg: Math.round(ortg*10)/10, drtg: Math.round(drtg*10)/10, netrtg: Math.round(netrtg*10)/10 };
+}
+
+// =====================================================
+// PROJECTED RECORD — simple, clearly-approximate Pythagorean-style
+// mapping from NetRtg to a projected win total. Not independently
+// calibrated this session; flagged as directional only.
+// =====================================================
+function projectRecord(netrtg) {
+  const winPct = Math.max(0.05, Math.min(0.95, 0.5 + netrtg * 0.028));
+  const wins = Math.round(winPct * 82);
+  return { wins, losses: 82 - wins };
+}
+
+// =====================================================
+// ORCHESTRATION
+// =====================================================
+let TEAM_RESULTS = [];
+
+async function boot() {
+  const grid = document.getElementById('rankGrid');
+  const loading = document.getElementById('loading');
+  const errorBox = document.getElementById('errorBox');
+  grid.innerHTML = ''; errorBox.style.display = 'none'; errorBox.innerHTML='';
+  loading.style.display = 'block';
+  document.getElementById('statsBar').style.display = 'none';
+  document.getElementById('controls').style.display = 'none';
+  const setStatus = s => document.getElementById('loadingStatus').textContent = s;
+
+  try {
+    setStatus('Loading SQL engine...');
+    const SQL = await initSqlJs({ locateFile: f => `https://cdnjs.cloudflare.com/ajax/libs/sql.js/1.10.3/${f}` });
+
+    setStatus('Fetching live data (Depth Charts, RealValue, Lineup Forge)...');
+    const [playerBuf, coefsJson, namesJson, predJson, rmTvText, defenseData, positionData] = await Promise.all([
+      fetchDb(PLAYER_DB_URL),
+      fetch(COEFS_URL).then(r => r.json()),
+      fetch(NAMES_URL).then(r => r.ok ? r.json() : {}).catch(() => ({})),
+      fetch(PREDICTIONS_URL + '?t=' + Date.now()).then(r => r.json()),
+      fetch(RV_TV_URL).then(r => r.text()),
+      loadDefenseData(),
+      loadPositionData(),
+    ]);
+
+    playerDb = new SQL.Database(new Uint8Array(playerBuf));
+    coefs = coefsJson;
+    NAME_DICT = namesJson || {};
+    PREDICTIONS = predJson;
+    DEFENSE = defenseData || {};
+    POSITIONS = positionData || {};
+
+    const parsed = parseRmTv(rmTvText);
+    LIVE_RATINGS = parsed.roster;
+
+    const ages = Object.values(LIVE_RATINGS).map(p => ageFromBirthday(p.birthday)).filter(a => a !== null);
+    if (ages.length) AVG_AGE = ages.reduce((a,b)=>a+b,0) / ages.length;
+
+    setStatus('Projecting starting fives...');
+    TEAM_RESULTS = [];
+    const teams = Object.keys(PREDICTIONS.teams || {});
+    for (const abbr of teams) {
+      const teamData = PREDICTIONS.teams[abbr];
+      const starters = teamData.starters || {};
+      const names = POSITIONS_ORDER.map(pos => starters[pos]).filter(Boolean);
+      if (names.length < 5) { TEAM_RESULTS.push({ abbr, error: 'incomplete depth chart' }); continue; }
+      const positions = POSITIONS_ORDER.filter(pos => starters[pos]);
+      const realPositions = names.map(n => POSITIONS[n] || POSITIONS[hhToNba(n)] || positions[names.indexOf(n)]);
+      const result = projectLineup(names, realPositions);
+      if (result.error) { TEAM_RESULTS.push({ abbr, names, error: result.error }); continue; }
+      TEAM_RESULTS.push({ abbr, names, positions: realPositions, ...result, record: projectRecord(result.netrtg) });
+    }
+
+    loading.style.display = 'none';
+    document.getElementById('statsBar').style.display = 'grid';
+    document.getElementById('controls').style.display = 'flex';
+    renderStats();
+    renderGrid();
+  } catch (err) {
+    console.error('[Projections]', err);
+    loading.style.display = 'none';
+    errorBox.style.display = 'block';
+    errorBox.innerHTML = `<div class="error-msg"><strong>Couldn't load projections.</strong>\n\n${err.message}\n\nTry refreshing — if this keeps happening, one of the live data sources may be down.</div>`;
+  }
+}
+
+function renderStats() {
+  const ok = TEAM_RESULTS.filter(t => !t.error);
+  document.getElementById('statTeams').textContent = `${ok.length} / 30`;
+  if (ok.length) {
+    const best = ok.reduce((a,b) => a.netrtg > b.netrtg ? a : b);
+    const avg = ok.reduce((s,t) => s+t.netrtg, 0) / ok.length;
+    document.getElementById('statBest').textContent = `${best.abbr} ${best.netrtg>=0?'+':''}${best.netrtg.toFixed(1)}`;
+    document.getElementById('statAvg').textContent = `${avg>=0?'+':''}${avg.toFixed(1)}`;
+  }
+  const defCount = Object.keys(DEFENSE).length;
+  document.getElementById('statDef').innerHTML = defCount > 0
+    ? `${defCount} players`
+    : `<span style="color:var(--red);font-size:0.9rem;">empty — box-score fallback active</span>`;
+}
+
+function renderGrid() {
+  const grid = document.getElementById('rankGrid');
+  const search = (document.getElementById('searchInput').value || '').toLowerCase();
+  const sortBy = document.getElementById('sortSelect').value;
+
+  let list = TEAM_RESULTS.filter(t => !t.error);
+  if (search) {
+    list = list.filter(t => t.abbr.toLowerCase().includes(search) || (t.names||[]).some(n => n.toLowerCase().includes(search)));
+  }
+  if (sortBy === 'net') list.sort((a,b) => b.netrtg - a.netrtg);
+  else if (sortBy === 'ortg') list.sort((a,b) => b.ortg - a.ortg);
+  else if (sortBy === 'drtg') list.sort((a,b) => a.drtg - b.drtg);
+  else if (sortBy === 'az') list.sort((a,b) => a.abbr.localeCompare(b.abbr));
+
+  grid.innerHTML = list.map((t, i) => {
+    const cls = t.netrtg >= 0 ? 'pos' : 'neg';
+    const rookieCount = t.quality.filter(q => q.isRookie).length;
+    const chips = [
+      ...t.viability.notes.slice(0,2).map(n => `<span class="chip warn">${n}</span>`),
+      ...(rookieCount ? [`<span class="chip rookie">${rookieCount} rookie${rookieCount>1?'s':''}</span>`] : []),
+    ];
+    if (!chips.length) chips.push('<span class="chip ok">No structural flags</span>');
+    return `<div class="team-card" onclick="openDetail('${t.abbr}')">
+      <div class="rank">#${i+1}</div>
+      <div class="team-name">${t.abbr}</div>
+      <div class="starters-line">${t.names.join(' · ')}</div>
+      <div class="net-row"><span class="net-value ${cls}">${t.netrtg>=0?'+':''}${t.netrtg.toFixed(1)}</span><span class="net-label">Net Rtg</span></div>
+      <div class="sub-ratings">ORtg ${t.ortg} &nbsp;·&nbsp; DRtg ${t.drtg} &nbsp;·&nbsp; Proj ${t.record.wins}-${t.record.losses}</div>
+      <div class="chip-row">${chips.join('')}</div>
+    </div>`;
+  }).join('');
+
+  if (!list.length) grid.innerHTML = '<div style="grid-column:1/-1;text-align:center;padding:3rem;color:var(--text-muted);">No teams match.</div>';
+}
+
+document.getElementById('searchInput').addEventListener('input', renderGrid);
+document.getElementById('sortSelect').addEventListener('change', renderGrid);
+
+function openDetail(abbr) {
+  const t = TEAM_RESULTS.find(r => r.abbr === abbr);
+  if (!t) return;
+  const panel = document.getElementById('detailPanel');
+  const rows = t.names.map((n, i) => {
+    const q = t.quality[i];
+    const rookieTag = q.isRookie ? ' <span style="color:var(--accent);font-weight:600;">ROOKIE — neutral value</span>' : '';
+    const ageStr = q.age !== null ? `age ${q.age.toFixed(1)}` : '';
+    const defStr = q.def_score !== null && q.def_score !== undefined ? `DEF ${q.def_score.toFixed(1)}` : '';
+    return `<div class="player-row">
+      <div class="pos">${t.positions[i]}</div>
+      <div class="pname">${n}<span class="sub">${ageStr}${ageStr&&defStr?' · ':''}${defStr}${rookieTag}</span></div>
+      <div class="prating">${q.rat365.toFixed(1)}</div>
+      <div class="pcontrib">off ${q.off_contrib>=0?'+':''}${q.off_contrib.toFixed(2)} / def ${q.def_contrib>=0?'+':''}${q.def_contrib.toFixed(2)}</div>
+    </div>`;
+  }).join('');
+
+  const notesHtml = t.viability.notes.length
+    ? t.viability.notes.map(n => `<div>⚠ ${n}</div>`).join('')
+    : '<div style="color:var(--green);">No structural concerns flagged</div>';
+
+  panel.innerHTML = `
+    <button class="detail-close" onclick="closeDetail()">✕</button>
+    <div class="detail-header">
+      <h2>${t.abbr} — Starting Five Projection</h2>
+    </div>
+    <div class="detail-metrics">
+      <div class="m"><div class="l">NetRtg</div><div class="v" style="color:${t.netrtg>=0?'var(--green)':'var(--red)'}">${t.netrtg>=0?'+':''}${t.netrtg.toFixed(1)}</div></div>
+      <div class="m"><div class="l">ORtg</div><div class="v">${t.ortg}</div></div>
+      <div class="m"><div class="l">DRtg</div><div class="v">${t.drtg}</div></div>
+    </div>
+    <div class="section-label">Projected 82-Game Record (directional only)</div>
+    <div style="font-size:1.1rem;font-weight:700;margin-bottom:0.8rem;">${t.record.wins}-${t.record.losses}</div>
+    <div class="section-label">Starting Five</div>
+    <div class="player-rows">${rows}</div>
+    <div class="section-label">Composition Notes</div>
+    <div class="note-list">${notesHtml}</div>
+    <div class="section-label">Model Detail</div>
+    <div class="note-list">
+      <div>Fit adjustment (composition, damped): ORtg ${t.ortgAdj>=0?'+':''}${t.ortgAdj.toFixed(2)} / DRtg ${t.drtgAdj>=0?'+':''}${t.drtgAdj.toFixed(2)}</div>
+      <div>TS efficiency shift: ${t.tsBonus>=0?'+':''}${t.tsBonus.toFixed(2)}</div>
+      <div>Defense source: ${Object.keys(DEFENSE).length ? 'live DEF_SCORE where available' : 'box-score approximation (defense-cache empty)'}</div>
+    </div>
+  `;
+  document.getElementById('detailOverlay').classList.add('active');
+}
+function closeDetail() { document.getElementById('detailOverlay').classList.remove('active'); }
+
+boot();
+</script>
+</body>
+</html>
