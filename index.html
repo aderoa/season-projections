@@ -742,6 +742,7 @@ async function boot() {
 
 function renderStats() {
   const ok = TEAM_RESULTS.filter(t => !t.error);
+  const failed = TEAM_RESULTS.filter(t => t.error);
   document.getElementById('statTeams').textContent = `${ok.length} / 30`;
   if (ok.length) {
     const best = ok.reduce((a,b) => a.netrtg > b.netrtg ? a : b);
@@ -753,6 +754,20 @@ function renderStats() {
   document.getElementById('statDef').innerHTML = defCount > 0
     ? `${defCount} players`
     : `<span style="color:var(--red);font-size:0.9rem;">empty — box-score fallback active</span>`;
+
+  const failBox = document.getElementById('failedTeamsBox') || (() => {
+    const div = document.createElement('div');
+    div.id = 'failedTeamsBox';
+    document.getElementById('statsBar').insertAdjacentElement('afterend', div);
+    return div;
+  })();
+  if (failed.length) {
+    failBox.style.cssText = 'max-width:1400px;margin:0.85rem auto 0;padding:0.85rem 1.5rem;background:#fff5f5;border:1px solid #fecaca;border-radius:8px;font-size:0.8rem;color:#7f1d1d;';
+    failBox.innerHTML = `<strong>${failed.length} team${failed.length===1?'':'s'} couldn't be projected:</strong> `
+      + failed.map(t => `${t.abbr} (${t.error})`).join(' &nbsp;·&nbsp; ');
+  } else {
+    failBox.innerHTML = '';
+  }
 }
 
 function renderGrid() {
