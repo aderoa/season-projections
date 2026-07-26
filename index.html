@@ -944,17 +944,30 @@ function generateAndRankCombos(units) {
   // representative combination still isn't playing all 48 minutes).
   // Confirmed directly: without this, Wembanyama appeared in all 20 of
   // SAS's selected combos.
+  //
+  // Separately: a backup or third-string player has a lower REALISTIC
+  // ceiling than a star hitting the general cap by being genuinely
+  // excellent -- a backup can't play more of the game than the starter
+  // they're spelling, and a third-stringer even less. Tier caps apply on
+  // top of the general cap, keyed by whichUnit (1=backup, 2=third-string)
+  // at the specific position that player occupies in a given combo.
   const MAX_APPEARANCES = 10;   // out of 20 selected -- no player exceeds half by count
   const MAX_WEIGHT_SHARE = 0.65; // fraction of total weighted share (RANK_WEIGHTS sums to 1.0)
+  const TIER_WEIGHT_CAP = { 1: 0.40, 2: 0.10 }; // backup / third-string ceilings
   const playerCount = {}, playerWeight = {};
   const selected = [];
   for (const combo of combos) {
     if (selected.length >= 20) break;
     const slotWeight = RANK_WEIGHTS[selected.length];
-    const violates = combo.names.some(name =>
-      (playerCount[name] || 0) >= MAX_APPEARANCES ||
-      (playerWeight[name] || 0) + slotWeight > MAX_WEIGHT_SHARE
-    );
+    const violates = combo.names.some((name, j) => {
+      if ((playerCount[name] || 0) >= MAX_APPEARANCES) return true;
+      const projectedWeight = (playerWeight[name] || 0) + slotWeight;
+      if (projectedWeight > MAX_WEIGHT_SHARE) return true;
+      const tier = combo.whichUnit[j];
+      const tierCap = TIER_WEIGHT_CAP[tier];
+      if (tierCap !== undefined && projectedWeight > tierCap) return true;
+      return false;
+    });
     if (violates) continue;
     selected.push(combo);
     for (const name of combo.names) {
