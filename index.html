@@ -716,6 +716,14 @@ async function loadPredictions() {
   return { generated_at: new Date().toISOString(), teams, derivedFromOrderJson: true };
 }
 
+// Empirical reference, measured directly from lineups.db (30 teams,
+// 2025-26 season): average share of team possessions by lineup usage
+// rank. Needs to be true top-level (not inside boot()) since both boot()
+// and openDetail() reference it.
+const EMPIRICAL_RANK_SHARES = [0.0738, 0.0415, 0.0339, 0.0267, 0.0231, 0.0194, 0.0174, 0.0154, 0.0146, 0.0137];
+const RANK_WEIGHT_SUM = EMPIRICAL_RANK_SHARES.reduce((a,b) => a+b, 0);
+const RANK_WEIGHTS = EMPIRICAL_RANK_SHARES.map(s => s / RANK_WEIGHT_SUM);
+
 async function boot() {
   const grid = document.getElementById('rankGrid');
   const loading = document.getElementById('loading');
@@ -766,21 +774,9 @@ async function boot() {
 // the backup at each of PG/SG/SF/PF/C), fully tractable to evaluate
 // exhaustively rather than hand-picking a few representative units.
 //
-// Empirical reference, measured directly from lineups.db (30 teams,
-// 2025-26 season): average share of team possessions by lineup usage
-// rank. Even the single most-used lineup only accounts for ~7% of a
-// team's minutes, and the top 10 combined only reach ~28% -- confirming
-// real rotations are dominated by many different combinations, not one
-// or two dominant blocks. These 10 real shares (renormalized to sum to
-// 1.0 across just the top 10, since a not-yet-played season has no
-// actual observed data beyond what this model can generate) are used to
-// weight the 10 best-projecting combinations this specific roster can
-// produce -- "trust the best combinations will be on the court" made
-// concrete: a coach finds and leans on their best lineups, weighted by
-// how much real NBA rotations actually lean on their best lineups.
-const EMPIRICAL_RANK_SHARES = [0.0738, 0.0415, 0.0339, 0.0267, 0.0231, 0.0194, 0.0174, 0.0154, 0.0146, 0.0137];
-const RANK_WEIGHT_SUM = EMPIRICAL_RANK_SHARES.reduce((a,b) => a+b, 0);
-const RANK_WEIGHTS = EMPIRICAL_RANK_SHARES.map(s => s / RANK_WEIGHT_SUM);
+// (Empirical rank-weight reference is declared above boot(), since
+// openDetail() also needs it -- see EMPIRICAL_RANK_SHARES/RANK_WEIGHTS
+// near the top of this script.)
 
 function resolveUnitNames(posMap) {
   const names = POSITIONS_ORDER.map(pos => posMap[pos]).filter(Boolean);
