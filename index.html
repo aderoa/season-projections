@@ -279,22 +279,16 @@ function parseRmTv(text) {
 }
 
 async function loadDefenseData() {
-  // Prefer the fast defense-cache endpoint; fall back to the live sheet
-  // directly if the cache is still empty (e.g. worker.js fix not deployed
-  // yet). Both paths were validated directly during this build.
-  try {
-    const cacheR = await fetch(DEF_CACHE_URL);
-    if (cacheR.ok) {
-      const cacheJson = await cacheR.json();
-      if (cacheJson && Object.keys(cacheJson).length > 0) {
-        // defense-cache stores {name: SC_MPG}, not the full DEF_SCORE row --
-        // this shape only carries score, which is all this tool needs.
-        const result = {};
-        for (const [name, score] of Object.entries(cacheJson)) result[name] = { def_score: score };
-        return result;
-      }
-    }
-  } catch (e) { /* fall through */ }
+  // defense-cache's API returns {name: SC_MPG}, NOT DEF_SCORE -- a
+  // completely different, much smaller scale (SC_MPG is typically
+  // 0.3-1.0; DEF_SCORE is typically 10-20). Feeding SC_MPG into a
+  // formula calibrated for DEF_SCORE's scale produces a nearly
+  // identical, deflated defensive contribution for almost every player
+  // (confirmed directly: -1.70/-1.71/-1.72 across an entire lineup,
+  // since SC_MPG's tiny spread barely moves the result). Going straight
+  // to the direct Sheets API fetch instead, which returns the real
+  // DEF_SCORE column on the correct scale -- already validated earlier
+  // this session against real, current data.
   try {
     const res = await fetch(DEF_URL);
     if (!res.ok) return {};
