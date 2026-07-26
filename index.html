@@ -303,25 +303,29 @@ async function loadDefenseData() {
     const headers = rows[headerIdx];
     const idx = {};
     headers.forEach((h, i) => { idx[(h||'').trim().toUpperCase()] = i; });
-    if (idx.PLAYER === undefined || idx.DEF_SCORE === undefined) {
-      console.warn('[DEF DEBUG] Column detection failed. idx:', idx, 'header row:', headers);
-      return {};
-    }
+    if (idx.PLAYER === undefined || idx.DEF_SCORE === undefined) return {};
     const result = {};
+    const resultGP = {};  // tracks GP per name so a short-window duplicate row can't silently overwrite the season-long one
     for (let i = headerIdx + 1; i < rows.length; i++) {
       const row = rows[i];
       const name = (row[idx.PLAYER] || '').trim();
       const score = parseFloat(row[idx.DEF_SCORE]);
-      if (name && !isNaN(score)) result[name] = { def_score: score };
-    }
-    console.log('[DEF DEBUG] idx.DEF_SCORE =', idx.DEF_SCORE, '| total parsed:', Object.keys(result).length);
-    for (const testName of ['Shai Gilgeous-Alexander', 'Cason Wallace', 'Jalen Williams', 'Chet Holmgren', 'Isaiah Hartenstein']) {
-      const allMatches = rows.filter(r => (r[idx.PLAYER]||'').trim() === testName);
-      console.log('[DEF DEBUG]', testName, '-> parsed:', JSON.stringify(result[testName]),
-        '| occurrences in sheet:', allMatches.length, '| all rows:', JSON.stringify(allMatches));
+      const gp = idx.GP !== undefined ? (parseFloat(row[idx.GP]) || 0) : 0;
+      if (!name || isNaN(score)) continue;
+      // The sheet contains two rows per player -- a full-season row and a
+      // separate short recent-form window (GP=7 in one observed case) that
+      // shares the same name. Without this check, whichever row happened
+      // to appear later in the sheet would silently overwrite the correct
+      // one -- confirmed directly: every OKC player's season-long DEF_SCORE
+      // (e.g. SGA's real 23.45) was being replaced by their 7-game window
+      // value (16.17) purely because of row order, not a parsing error.
+      if (!(name in result) || gp > resultGP[name]) {
+        result[name] = { def_score: score };
+        resultGP[name] = gp;
+      }
     }
     return result;
-  } catch (e) { console.warn('[DEF DEBUG] loadDefenseData threw:', e); return {}; }
+  } catch (e) { console.warn('loadDefenseData failed:', e); return {}; }
 }
 
 async function loadPositionData() {
@@ -545,10 +549,6 @@ function getDefenseQuality(hhName) {
   const d = computeWeightedDefScore(hhName);
   const result = d ? { def_score: d.effective, source: d.source } : null;
   _defenseCache2[hhName] = result;
-  if (['Shai Gilgeous-Alexander', 'Cason Wallace', 'Jalen Williams', 'Chet Holmgren', 'Isaiah Hartenstein'].includes(hhName)) {
-    console.log('[DEF DEBUG] getDefenseQuality(', hhName, ') -> result:', JSON.stringify(result),
-      '| DEFENSE[name] was:', JSON.stringify(DEFENSE[hhName]));
-  }
   return result;
 }
 
