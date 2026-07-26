@@ -191,7 +191,17 @@ const BOOST_GP_FULL = 40, BOOST_GP_NONE = 50;
 const COMP_BLK = 5, COMP_STL = 5, COMP_DREB = 40;
 const RECENCY_DECAY = 0.65;
 const MIN_SEASON_GP = 5;
-const PIE_SHIFT = 7.68, PIE_SCALE = 2.03, PIE_DERIVED_CAP = 35;
+// Calibrated by regressing real current-season rat365 against real PIE
+// AND box-score defense composite for 397 players (GP>=20, 2025-26) --
+// replacing the original rough single-variable estimate. R^2=0.557,
+// barely above PIE-alone's 0.542 -- the honest ceiling for this proxy.
+// The remaining ~44% of variance likely reflects tracking-based
+// defensive data (deflections, contested shots, positioning) that
+// exists in the live Defensive_Rankings sheet for the CURRENT season
+// but has no equivalent anywhere in this pipeline for historical
+// seasons. Included the defense term anyway since it's a small, real,
+// validated improvement, not because it closes the gap.
+const PIE_COEF = 1.1363, PIE_DEF_COEF = 0.2091, PIE_INTERCEPT = -6.2030, PIE_DERIVED_CAP = 35;
 const TOTAL_USG_TARGET = 1.0;
 const USG_TS_SLOPE = -0.6, TS_EFFICIENCY_FACTOR = 0.03;
 const CURRENT_SEASON = '2025-26';
@@ -353,7 +363,7 @@ async function loadPositionData() {
 // on top (Lineup Forge has no age mechanism of its own).
 // =====================================================
 function seasonStartYear(s) { return parseInt(String(s).slice(0,4), 10); }
-function pieToRat365(pie) { const p = pie*100; return Math.min(PIE_DERIVED_CAP, Math.max(0, (p-PIE_SHIFT)*PIE_SCALE)); }
+function pieToRat365(pie, boxDef) { const p = pie*100; return Math.min(PIE_DERIVED_CAP, Math.max(0, PIE_COEF*p + PIE_DEF_COEF*(boxDef||0) + PIE_INTERCEPT)); }
 function boostFraction(gp) {
   if (gp >= BOOST_GP_NONE) return 0;
   if (gp <= BOOST_GP_FULL) return 1;
@@ -389,9 +399,12 @@ function computeWeightedRat365(hhName) {
   const nbaName = hhToNba(hhName);
   const live = LIVE_RATINGS[hhName];
   const currentRat365 = live ? live.rat365 : null;
-  const stmt = playerDb.prepare(`SELECT SEASON, CAST(GP AS INTEGER) as GP, CAST(PIE AS REAL) as PIE
-    FROM player_advanced WHERE PLAYER_NAME=? AND SEASON_TYPE='Regular Season' AND CAST(GP AS INTEGER)>=?
-    ORDER BY SEASON DESC`);
+  const stmt = playerDb.prepare(`SELECT a.SEASON, CAST(a.GP AS INTEGER) as GP, CAST(a.PIE AS REAL) as PIE,
+      CAST(a.DREB_PCT AS REAL) as DREB_PCT, CAST(b.BLK AS REAL) as BLK, CAST(b.STL AS REAL) as STL
+    FROM player_advanced a LEFT JOIN player_base b
+      ON a.PLAYER_NAME=b.PLAYER_NAME AND a.SEASON=b.SEASON AND a.SEASON_TYPE=b.SEASON_TYPE
+    WHERE a.PLAYER_NAME=? AND a.SEASON_TYPE='Regular Season' AND CAST(a.GP AS INTEGER)>=?
+    ORDER BY a.SEASON DESC`);
   stmt.bind([nbaName, MIN_SEASON_GP]);
   const rows = [];
   while (stmt.step()) rows.push(stmt.getAsObject());
@@ -415,7 +428,7 @@ function computeWeightedRat365(hhName) {
     const w = r.GP * Math.pow(RECENCY_DECAY, yd);
     let rat;
     if (r.SEASON === CURRENT_SEASON && currentRat365 !== null) rat = currentRat365;
-    else rat = pieToRat365(r.PIE);
+    else rat = pieToRat365(r.PIE, boxScoreDefComposite(r.BLK, r.STL, r.DREB_PCT));
     tw += rat*w; twt += w;
     if (r.SEASON === CURRENT_SEASON) curGP = r.GP;
   }
