@@ -448,16 +448,30 @@ function computeWeightedDefScore(hhName) {
 
 function getStats2526(hhName) {
   const nbaName = hhToNba(hhName);
-  const stmt = playerDb.prepare(`SELECT a.USG_PCT, a.AST_PCT, a.REB_PCT, b.FG3_PCT, b.FG3A, b.BLK
-    FROM player_advanced a JOIN player_base b
-      ON a.PLAYER_NAME=b.PLAYER_NAME AND a.SEASON=b.SEASON AND a.SEASON_TYPE=b.SEASON_TYPE
-    WHERE a.PLAYER_NAME=? AND a.SEASON='2025-26' AND a.SEASON_TYPE='Regular Season' LIMIT 1`);
-  stmt.bind([nbaName]);
-  let row = null;
-  if (stmt.step()) row = stmt.getAsObject();
-  stmt.free();
+  const query = (seasonFilter) => {
+    const stmt = playerDb.prepare(`SELECT a.SEASON, a.USG_PCT, a.AST_PCT, a.REB_PCT, b.FG3_PCT, b.FG3A, b.BLK
+      FROM player_advanced a JOIN player_base b
+        ON a.PLAYER_NAME=b.PLAYER_NAME AND a.SEASON=b.SEASON AND a.SEASON_TYPE=b.SEASON_TYPE
+      WHERE a.PLAYER_NAME=? AND a.SEASON_TYPE='Regular Season' AND CAST(a.GP AS INTEGER)>=?
+        ${seasonFilter} ORDER BY a.SEASON DESC LIMIT 1`);
+    stmt.bind([nbaName, MIN_SEASON_GP]);
+    let row = null;
+    if (stmt.step()) row = stmt.getAsObject();
+    stmt.free();
+    return row;
+  };
+  // Same trust-the-watermark principle as the rating: if the current
+  // season is empty or too thin (injury -- Kyrie, Haliburton, VanVleet,
+  // Lillard all have ~0 GP this season), fall back to the most recent
+  // season with meaningful playing time rather than failing the player
+  // (and therefore the whole team's projection) outright.
+  let row = query("AND a.SEASON='2025-26'");
+  let usedFallback = false;
+  if (!row) { row = query(''); usedFallback = row !== null; }
   if (!row) return null;
-  return { usg: row.USG_PCT||0, ast_pct: row.AST_PCT||0, reb_pct: row.REB_PCT||0, fg3p: row.FG3_PCT||0, fg3a: row.FG3A||0, blk: row.BLK||0 };
+  return { usg: row.USG_PCT||0, ast_pct: row.AST_PCT||0, reb_pct: row.REB_PCT||0,
+    fg3p: row.FG3_PCT||0, fg3a: row.FG3A||0, blk: row.BLK||0,
+    statsSeason: row.SEASON, usedFallback };
 }
 
 // Rookie handling: neutral value from age + draft position, and (in
@@ -613,7 +627,7 @@ function projectLineup(names, positions) {
   const drtg = displayDrtg + via.drtgPen;
   const netrtg = (totalOff + totalDef) + fitNet + tsBonus - via.ortgPen - via.drtgPen;
 
-  return { quality, totalOff, totalDef, ortgAdj, drtgAdj, tsBonus, viability: via,
+  return { quality, stats, totalOff, totalDef, ortgAdj, drtgAdj, tsBonus, viability: via,
     ortg: Math.round(ortg*10)/10, drtg: Math.round(drtg*10)/10, netrtg: Math.round(netrtg*10)/10 };
 }
 
@@ -814,12 +828,14 @@ function openDetail(abbr) {
   const panel = document.getElementById('detailPanel');
   const rows = t.names.map((n, i) => {
     const q = t.quality[i];
+    const s = t.stats[i];
     const rookieTag = q.isRookie ? ' <span style="color:var(--accent);font-weight:600;">ROOKIE — neutral value</span>' : '';
+    const fallbackTag = (s && s.usedFallback) ? ` <span style="color:var(--orange);font-weight:600;">stats from ${s.statsSeason} (injured/DNP 2025-26)</span>` : '';
     const ageStr = q.age !== null ? `age ${q.age.toFixed(1)}` : '';
     const defStr = q.def_score !== null && q.def_score !== undefined ? `DEF ${q.def_score.toFixed(1)}` : '';
     return `<div class="player-row">
       <div class="pos">${t.positions[i]}</div>
-      <div class="pname">${n}<span class="sub">${ageStr}${ageStr&&defStr?' · ':''}${defStr}${rookieTag}</span></div>
+      <div class="pname">${n}<span class="sub">${ageStr}${ageStr&&defStr?' · ':''}${defStr}${rookieTag}${fallbackTag}</span></div>
       <div class="prating">${q.rat365.toFixed(1)}</div>
       <div class="pcontrib">off ${q.off_contrib>=0?'+':''}${q.off_contrib.toFixed(2)} / def ${q.def_contrib>=0?'+':''}${q.def_contrib.toFixed(2)}</div>
     </div>`;
