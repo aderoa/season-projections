@@ -456,6 +456,13 @@ function computeWeightedDefScore(hhName) {
 }
 
 function getStats2526(hhName) {
+  if (hhName in _statsCache) return _statsCache[hhName];
+  const result = _computeStats2526(hhName);
+  _statsCache[hhName] = result;
+  return result;
+}
+
+function _computeStats2526(hhName) {
   const nbaName = hhToNba(hhName);
   const query = (seasonFilter) => {
     const stmt = playerDb.prepare(`SELECT a.SEASON, a.USG_PCT, a.AST_PCT, a.REB_PCT, b.FG3_PCT, b.FG3A, b.BLK
@@ -491,7 +498,16 @@ function rookieRating(draftPos) {
   return Math.max(2.0, ROOKIE_BASE_RATING * Math.exp(-ROOKIE_DRAFT_DECAY * (dp-1)));
 }
 
+const _qualityCache = {}, _defenseCache2 = {}, _statsCache = {};
+
 function getQuality(hhName) {
+  if (hhName in _qualityCache) return _qualityCache[hhName];
+  const result = _computeQuality(hhName);
+  _qualityCache[hhName] = result;
+  return result;
+}
+
+function _computeQuality(hhName) {
   const w = computeWeightedRat365(hhName);
   const live = LIVE_RATINGS[hhName];
   const isRookie = !w && live; // has a live roster entry but zero NBA history
@@ -522,9 +538,11 @@ function getQuality(hhName) {
 }
 
 function getDefenseQuality(hhName) {
+  if (hhName in _defenseCache2) return _defenseCache2[hhName];
   const d = computeWeightedDefScore(hhName);
-  if (!d) return null;
-  return { def_score: d.effective, source: d.source };
+  const result = d ? { def_score: d.effective, source: d.source } : null;
+  _defenseCache2[hhName] = result;
+  return result;
 }
 
 // =====================================================
@@ -742,49 +760,27 @@ async function boot() {
 
 // Real-world rotation modeling. lineups.db shows even a team's single
 // most-used 5-man combo only accounts for ~7% of total possessions, and
-// the top 10 combos combined only reach ~28% -- real minutes are
-// dominated by STAGGERED combinations (starters + bench mixed), not
-// clean "all-starters" or "all-bench" blocks. This informs three units:
-//   - starters: all 5 starters together
-//   - staggered-best: one starter swapped for their backup, testing all
-//     5 possible single swaps and keeping whichever projects best --
-//     "trust the best combination a coach would actually deploy"
-//   - bench: pure rank-2 by position (the long tail: deep bench
-//     stretches, blowouts, multiple starters resting at once)
-// Weights start from a realistic baseline, then adapt toward whichever
-// units project better -- a real coach shortens a demonstrably bad
-// bench's minutes rather than playing a fixed share regardless of
-// quality -- damped so small gaps barely move the needle, with floors/
-// ceilings so no unit ever gets 0% (foul trouble, fatigue, and blowouts
-// force some real rotation no matter how good or bad a unit projects).
-const BASE_W = { start: 0.25, stag: 0.55, bench: 0.20 };
-const FLOOR_W = { start: 0.12, stag: 0.40, bench: 0.08 };
-const CEIL_W = { start: 0.45, stag: 0.65, bench: 0.35 };
-const ADAPT_K = 0.06;
-
-function adaptiveWeights(netrtgs) {
-  const best = Math.max(netrtgs.start, netrtgs.stag, netrtgs.bench);
-  const raw = {};
-  for (const k of ['start','stag','bench']) raw[k] = BASE_W[k] * Math.exp(-ADAPT_K * (best - netrtgs[k]));
-  const total = raw.start + raw.stag + raw.bench;
-  let w = {}; for (const k of ['start','stag','bench']) w[k] = raw[k] / total;
-  for (const k of ['start','stag','bench']) w[k] = Math.max(FLOOR_W[k], Math.min(CEIL_W[k], w[k]));
-  const total2 = w.start + w.stag + w.bench;
-  for (const k of ['start','stag','bench']) w[k] /= total2;
-  return w;
-}
-
-function bestStaggered(startNames, startPos, benchNames, benchPos) {
-  let best = null;
-  for (let i = 0; i < 5; i++) {
-    const combo = benchNames.slice();
-    combo[i] = startNames[i];
-    const result = projectLineup(combo, benchPos);
-    if (result.error) continue;
-    if (!best || result.netrtg > best.result.netrtg) best = { names: combo, positions: benchPos, result };
-  }
-  return best;
-}
+// Real rotation modeling, done properly this time. The depth chart gives
+// exactly 2 depth levels per position (starter, first backup) -- that's
+// 2^5 = 32 possible position-structured lineups (choose the starter or
+// the backup at each of PG/SG/SF/PF/C), fully tractable to evaluate
+// exhaustively rather than hand-picking a few representative units.
+//
+// Empirical reference, measured directly from lineups.db (30 teams,
+// 2025-26 season): average share of team possessions by lineup usage
+// rank. Even the single most-used lineup only accounts for ~7% of a
+// team's minutes, and the top 10 combined only reach ~28% -- confirming
+// real rotations are dominated by many different combinations, not one
+// or two dominant blocks. These 10 real shares (renormalized to sum to
+// 1.0 across just the top 10, since a not-yet-played season has no
+// actual observed data beyond what this model can generate) are used to
+// weight the 10 best-projecting combinations this specific roster can
+// produce -- "trust the best combinations will be on the court" made
+// concrete: a coach finds and leans on their best lineups, weighted by
+// how much real NBA rotations actually lean on their best lineups.
+const EMPIRICAL_RANK_SHARES = [0.0738, 0.0415, 0.0339, 0.0267, 0.0231, 0.0194, 0.0174, 0.0154, 0.0146, 0.0137];
+const RANK_WEIGHT_SUM = EMPIRICAL_RANK_SHARES.reduce((a,b) => a+b, 0);
+const RANK_WEIGHTS = EMPIRICAL_RANK_SHARES.map(s => s / RANK_WEIGHT_SUM);
 
 function resolveUnitNames(posMap) {
   const names = POSITIONS_ORDER.map(pos => posMap[pos]).filter(Boolean);
@@ -794,7 +790,23 @@ function resolveUnitNames(posMap) {
   return { names, positions: realPositions };
 }
 
-setStatus('Projecting starters, staggered, and bench units...');
+function generateAndRankCombos(startUnit, benchUnit) {
+  const combos = [];
+  for (let mask = 0; mask < 32; mask++) {
+    const names = [], positions = [];
+    for (let i = 0; i < 5; i++) {
+      const useBench = (mask & (1 << i)) !== 0;
+      names.push(useBench ? benchUnit.names[i] : startUnit.names[i]);
+      positions.push(useBench ? benchUnit.positions[i] : startUnit.positions[i]);
+    }
+    const result = projectLineup(names, positions);
+    if (!result.error) combos.push({ mask, names, positions, result });
+  }
+  combos.sort((a, b) => b.result.netrtg - a.result.netrtg);
+  return combos.slice(0, 10);
+}
+
+setStatus('Evaluating 32 lineup combinations per team...');
 TEAM_RESULTS = [];
 const teams = Object.keys(PREDICTIONS.teams || {});
 for (const abbr of teams) {
@@ -810,23 +822,20 @@ for (const abbr of teams) {
   if (startResult.error) { TEAM_RESULTS.push({ abbr, names: startUnit.names, error: startResult.error }); continue; }
 
   const benchUnit = resolveUnitNames(benchRank2);
-  let benchResult = null, stagUnit = null;
+  let top10 = null, blended, weightNote;
   if (benchUnit) {
     const br = projectLineup(benchUnit.names, benchUnit.positions);
-    if (!br.error) {
-      benchResult = br;
-      stagUnit = bestStaggered(startUnit.names, startUnit.positions, benchUnit.names, benchUnit.positions);
-    }
+    if (!br.error) top10 = generateAndRankCombos(startUnit, benchUnit);
   }
 
-  let blended, weightNote, weights = null;
-  if (benchResult && stagUnit) {
-    const netrtgs = { start: startResult.netrtg, stag: stagUnit.result.netrtg, bench: benchResult.netrtg };
-    weights = adaptiveWeights(netrtgs);
-    const ortg = startResult.ortg*weights.start + stagUnit.result.ortg*weights.stag + benchResult.ortg*weights.bench;
-    const drtg = startResult.drtg*weights.start + stagUnit.result.drtg*weights.stag + benchResult.drtg*weights.bench;
+  if (top10 && top10.length === 10) {
+    let ortg = 0, drtg = 0;
+    for (let i = 0; i < 10; i++) {
+      ortg += top10[i].result.ortg * RANK_WEIGHTS[i];
+      drtg += top10[i].result.drtg * RANK_WEIGHTS[i];
+    }
     blended = { ortg: Math.round(ortg*10)/10, drtg: Math.round(drtg*10)/10, netrtg: Math.round((ortg-drtg)*10)/10 };
-    weightNote = `Starters ${Math.round(weights.start*100)}% · Staggered ${Math.round(weights.stag*100)}% · Bench ${Math.round(weights.bench*100)}% (adaptive -- shifts toward whichever units actually project better)`;
+    weightNote = `Weighted across the 10 best of 32 possible lineup combinations (starter/backup at each position), using the real minutes-share-by-usage-rank curve measured from lineups.db.`;
   } else {
     blended = { ortg: startResult.ortg, drtg: startResult.drtg, netrtg: startResult.netrtg };
     weightNote = 'starters only -- bench unit incomplete in the depth chart';
@@ -835,9 +844,7 @@ for (const abbr of teams) {
   TEAM_RESULTS.push({
     abbr, names: startUnit.names, positions: startUnit.positions,
     starters: { names: startUnit.names, positions: startUnit.positions, ...startResult },
-    staggered: stagUnit ? { names: stagUnit.names, positions: stagUnit.positions, ...stagUnit.result } : null,
-    bench: benchResult ? { names: benchUnit.names, positions: benchUnit.positions, ...benchResult } : null,
-    weights, weightNote,
+    top10, weightNote,
     ...blended,
     viability: startResult.viability,
     quality: startResult.quality, stats: startResult.stats,
@@ -915,7 +922,7 @@ function renderGrid() {
       <div class="team-name">${t.abbr}</div>
       <div class="starters-line">${t.names.join(' · ')}</div>
       <div class="net-row"><span class="net-value ${cls}">${t.netrtg>=0?'+':''}${t.netrtg.toFixed(1)}</span><span class="net-label">Net Rtg</span></div>
-      <div class="sub-ratings">ORtg ${t.ortg} &nbsp;·&nbsp; DRtg ${t.drtg} &nbsp;·&nbsp; Proj ${t.record.wins}-${t.record.losses}${t.bench ? ' &nbsp;·&nbsp; rotation-adaptive' : ' &nbsp;·&nbsp; starters only'}</div>
+      <div class="sub-ratings">ORtg ${t.ortg} &nbsp;·&nbsp; DRtg ${t.drtg} &nbsp;·&nbsp; Proj ${t.record.wins}-${t.record.losses}${t.top10 ? ' &nbsp;·&nbsp; top-10-of-32' : ' &nbsp;·&nbsp; starters only'}</div>
       <div class="chip-row">${chips.join('')}</div>
     </div>`;
   }).join('');
@@ -952,6 +959,20 @@ function openDetail(abbr) {
     ? unit.viability.notes.map(n => `<div>⚠ ${n}</div>`).join('')
     : '<div style="color:var(--green);">No structural concerns flagged</div>';
 
+  let top10Html = '';
+  if (t.top10) {
+    top10Html = t.top10.map((combo, i) => {
+      const isStart = j => (combo.mask & (1 << j)) === 0;
+      const nameSpans = combo.names.map((n, j) => isStart(j)
+        ? `<b>${n}</b>` : `<span style="color:var(--text-muted);">${n}</span>`).join(' · ');
+      return `<div class="player-row" style="grid-template-columns:2rem 1fr auto;">
+        <div class="pos">#${i+1}</div>
+        <div class="pname" style="font-weight:400;">${nameSpans}</div>
+        <div class="prating">${combo.result.netrtg>=0?'+':''}${combo.result.netrtg.toFixed(1)} <span style="color:var(--text-muted);font-weight:400;">(${Math.round(RANK_WEIGHTS[i]*100)}%)</span></div>
+      </div>`;
+    }).join('');
+  }
+
   panel.innerHTML = `
     <button class="detail-close" onclick="closeDetail()">✕</button>
     <div class="detail-header">
@@ -966,23 +987,18 @@ function openDetail(abbr) {
     <div class="section-label">Projected 82-Game Record (directional only)</div>
     <div style="font-size:1.1rem;font-weight:700;margin-bottom:0.8rem;">${t.record.wins}-${t.record.losses}</div>
 
-    <div class="section-label">Starters ${t.weights ? `&nbsp;<span style="color:var(--accent);font-weight:700;">${Math.round(t.weights.start*100)}%</span>` : ''} &nbsp;<span style="color:var(--text-muted);font-weight:400;">(NetRtg ${t.starters.netrtg>=0?'+':''}${t.starters.netrtg.toFixed(1)})</span></div>
+    <div class="section-label">Starting Five &nbsp;<span style="color:var(--text-muted);font-weight:400;">(NetRtg ${t.starters.netrtg>=0?'+':''}${t.starters.netrtg.toFixed(1)})</span></div>
     <div class="player-rows">${renderUnitRows(t.starters)}</div>
     <div class="note-list" style="margin-bottom:1rem;">${notesFor(t.starters)}</div>
 
-    ${t.staggered ? `
-    <div class="section-label">Staggered (best 1-swap) &nbsp;<span style="color:var(--accent);font-weight:700;">${t.weights ? Math.round(t.weights.stag*100)+'%' : ''}</span> &nbsp;<span style="color:var(--text-muted);font-weight:400;">(NetRtg ${t.staggered.netrtg>=0?'+':''}${t.staggered.netrtg.toFixed(1)})</span></div>
-    <div class="player-rows">${renderUnitRows(t.staggered)}</div>
-    <div class="note-list" style="margin-bottom:1rem;">${notesFor(t.staggered)}</div>
-    ` : ''}
-
-    <div class="section-label">Bench (rank-2 by position) ${t.weights ? `&nbsp;<span style="color:var(--accent);font-weight:700;">${Math.round(t.weights.bench*100)}%</span>` : ''} &nbsp;<span style="color:var(--text-muted);font-weight:400;">${t.bench ? `(NetRtg ${t.bench.netrtg>=0?'+':''}${t.bench.netrtg.toFixed(1)})` : ''}</span></div>
-    ${t.bench ? `<div class="player-rows">${renderUnitRows(t.bench)}</div>` : ''}
-    <div class="note-list">${t.bench ? notesFor(t.bench) : '<div style="color:var(--text-muted);">No usable bench unit -- depth chart incomplete beyond starters</div>'}</div>
+    ${t.top10 ? `
+    <div class="section-label">Top 10 of 32 Possible Combinations &nbsp;<span style="color:var(--text-muted);font-weight:400;">(bold = starter, gray = backup; % = real minutes-share weight)</span></div>
+    <div class="player-rows">${top10Html}</div>
+    ` : '<div class="note-list"><div style="color:var(--text-muted);">Bench unit incomplete -- using starters only</div></div>'}
 
     <div class="section-label">Model Detail</div>
     <div class="note-list">
-      <div>Weights are adaptive: a demonstrably weak unit gets shortened toward its floor rather than playing a fixed share regardless of quality (real coaching behavior).</div>
+      <div>Weights come from the real, empirically-measured share of team possessions by lineup usage rank (lineups.db, 2025-26) -- not an assumed split.</div>
       <div>Defense source: ${Object.keys(DEFENSE).length ? 'live DEF_SCORE where available' : 'box-score approximation (defense-cache empty)'}</div>
     </div>
   `;
