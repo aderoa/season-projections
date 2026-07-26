@@ -775,9 +775,26 @@ async function boot() {
 function resolveUnitNames(posMap) {
   const names = POSITIONS_ORDER.map(pos => posMap[pos]).filter(Boolean);
   if (names.length < 5) return null;
-  const positions = POSITIONS_ORDER.filter(pos => posMap[pos]);
-  const realPositions = names.map(n => POSITIONS[n] || POSITIONS[hhToNba(n)] || positions[names.indexOf(n)]);
-  return { names, positions: realPositions };
+  const slotPositions = POSITIONS_ORDER.filter(pos => posMap[pos]);
+  const realPositions = names.map(n => POSITIONS[n] || POSITIONS[hhToNba(n)] || slotPositions[names.indexOf(n)]);
+
+  // Validate: a real 5-man unit needs exactly one PG/SG/SF/PF/C. The
+  // general position-reference sheet gives each player's generic nominal
+  // position, which can collide when two players share one (e.g. two
+  // nominal centers, like Holmgren and Hartenstein, both listed as "C"
+  // even though the depth chart specifically starts one of them at PF
+  // for this team) -- confirmed directly: OKC's five was showing PG,
+  // PG, SF, C, C, silently breaking every viability check that depends
+  // on position (true-bigs count, rim protection, etc.). If the real-
+  // position lookup doesn't form a valid one-of-each set, trust the
+  // depth chart's own slot assignment instead -- it's guaranteed valid
+  // by construction, even if occasionally less precise for an individual
+  // player's true role.
+  const isValidSet = new Set(realPositions).size === 5 &&
+    POSITIONS_ORDER.every(p => realPositions.includes(p));
+  const positions = isValidSet ? realPositions : slotPositions;
+
+  return { names, positions };
 }
 
 function generateAndRankCombos(startUnit, benchUnit) {
