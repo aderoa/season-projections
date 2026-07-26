@@ -740,12 +740,51 @@ async function boot() {
     const ages = Object.values(LIVE_RATINGS).map(p => ageFromBirthday(p.birthday)).filter(a => a !== null);
     if (ages.length) AVG_AGE = ages.reduce((a,b)=>a+b,0) / ages.length;
 
-// Realistic minutes distribution: 240 team-minutes/game (5 x 48), starters
-// getting the bulk, primary bench unit getting meaningfully less. This is
-// what turns "the starting five's rate stats" into "the team's actual
-// expected performance" -- a team doesn't play 48 minutes of its starters.
-const STARTER_MPG = 32;
-const BENCH_MPG = 17;
+// Real-world rotation modeling. lineups.db shows even a team's single
+// most-used 5-man combo only accounts for ~7% of total possessions, and
+// the top 10 combos combined only reach ~28% -- real minutes are
+// dominated by STAGGERED combinations (starters + bench mixed), not
+// clean "all-starters" or "all-bench" blocks. This informs three units:
+//   - starters: all 5 starters together
+//   - staggered-best: one starter swapped for their backup, testing all
+//     5 possible single swaps and keeping whichever projects best --
+//     "trust the best combination a coach would actually deploy"
+//   - bench: pure rank-2 by position (the long tail: deep bench
+//     stretches, blowouts, multiple starters resting at once)
+// Weights start from a realistic baseline, then adapt toward whichever
+// units project better -- a real coach shortens a demonstrably bad
+// bench's minutes rather than playing a fixed share regardless of
+// quality -- damped so small gaps barely move the needle, with floors/
+// ceilings so no unit ever gets 0% (foul trouble, fatigue, and blowouts
+// force some real rotation no matter how good or bad a unit projects).
+const BASE_W = { start: 0.25, stag: 0.55, bench: 0.20 };
+const FLOOR_W = { start: 0.12, stag: 0.40, bench: 0.08 };
+const CEIL_W = { start: 0.45, stag: 0.65, bench: 0.35 };
+const ADAPT_K = 0.06;
+
+function adaptiveWeights(netrtgs) {
+  const best = Math.max(netrtgs.start, netrtgs.stag, netrtgs.bench);
+  const raw = {};
+  for (const k of ['start','stag','bench']) raw[k] = BASE_W[k] * Math.exp(-ADAPT_K * (best - netrtgs[k]));
+  const total = raw.start + raw.stag + raw.bench;
+  let w = {}; for (const k of ['start','stag','bench']) w[k] = raw[k] / total;
+  for (const k of ['start','stag','bench']) w[k] = Math.max(FLOOR_W[k], Math.min(CEIL_W[k], w[k]));
+  const total2 = w.start + w.stag + w.bench;
+  for (const k of ['start','stag','bench']) w[k] /= total2;
+  return w;
+}
+
+function bestStaggered(startNames, startPos, benchNames, benchPos) {
+  let best = null;
+  for (let i = 0; i < 5; i++) {
+    const combo = benchNames.slice();
+    combo[i] = startNames[i];
+    const result = projectLineup(combo, benchPos);
+    if (result.error) continue;
+    if (!best || result.netrtg > best.result.netrtg) best = { names: combo, positions: benchPos, result };
+  }
+  return best;
+}
 
 function resolveUnitNames(posMap) {
   const names = POSITIONS_ORDER.map(pos => posMap[pos]).filter(Boolean);
@@ -755,16 +794,13 @@ function resolveUnitNames(posMap) {
   return { names, positions: realPositions };
 }
 
-setStatus('Projecting starting fives and bench units...');
+setStatus('Projecting starters, staggered, and bench units...');
 TEAM_RESULTS = [];
 const teams = Object.keys(PREDICTIONS.teams || {});
 for (const abbr of teams) {
   const teamData = PREDICTIONS.teams[abbr];
   const starterMap = teamData.starters || {};
   const benchMap = teamData.bench || {};
-  // Rank-2 at each position -- the primary bench unit, same positional
-  // shape as the starters (one PG/SG/SF/PF/C), taken directly from the
-  // depth chart's own ordering.
   const benchRank2 = {};
   for (const pos of POSITIONS_ORDER) benchRank2[pos] = (benchMap[pos] || [])[0] || null;
 
@@ -774,23 +810,24 @@ for (const abbr of teams) {
   if (startResult.error) { TEAM_RESULTS.push({ abbr, names: startUnit.names, error: startResult.error }); continue; }
 
   const benchUnit = resolveUnitNames(benchRank2);
-  let benchResult = null;
+  let benchResult = null, stagUnit = null;
   if (benchUnit) {
     const br = projectLineup(benchUnit.names, benchUnit.positions);
-    if (!br.error) benchResult = br;
+    if (!br.error) {
+      benchResult = br;
+      stagUnit = bestStaggered(startUnit.names, startUnit.positions, benchUnit.names, benchUnit.positions);
+    }
   }
 
-  let blended, weightNote;
-  if (benchResult) {
-    const wStart = 5 * STARTER_MPG, wBench = 5 * BENCH_MPG, wTotal = wStart + wBench;
-    const ortg = (startResult.ortg * wStart + benchResult.ortg * wBench) / wTotal;
-    const drtg = (startResult.drtg * wStart + benchResult.drtg * wBench) / wTotal;
+  let blended, weightNote, weights = null;
+  if (benchResult && stagUnit) {
+    const netrtgs = { start: startResult.netrtg, stag: stagUnit.result.netrtg, bench: benchResult.netrtg };
+    weights = adaptiveWeights(netrtgs);
+    const ortg = startResult.ortg*weights.start + stagUnit.result.ortg*weights.stag + benchResult.ortg*weights.bench;
+    const drtg = startResult.drtg*weights.start + stagUnit.result.drtg*weights.stag + benchResult.drtg*weights.bench;
     blended = { ortg: Math.round(ortg*10)/10, drtg: Math.round(drtg*10)/10, netrtg: Math.round((ortg-drtg)*10)/10 };
-    weightNote = `${wStart}+${wBench} of ${wTotal} min/game modeled (starters @ ${STARTER_MPG} MPG, bench @ ${BENCH_MPG} MPG)`;
+    weightNote = `Starters ${Math.round(weights.start*100)}% · Staggered ${Math.round(weights.stag*100)}% · Bench ${Math.round(weights.bench*100)}% (adaptive -- shifts toward whichever units actually project better)`;
   } else {
-    // No usable bench unit for this team (incomplete depth chart bench
-    // slots) -- fall back to starters-only rather than fail the team,
-    // flagged clearly so it's not confused with a real 10-man projection.
     blended = { ortg: startResult.ortg, drtg: startResult.drtg, netrtg: startResult.netrtg };
     weightNote = 'starters only -- bench unit incomplete in the depth chart';
   }
@@ -798,11 +835,12 @@ for (const abbr of teams) {
   TEAM_RESULTS.push({
     abbr, names: startUnit.names, positions: startUnit.positions,
     starters: { names: startUnit.names, positions: startUnit.positions, ...startResult },
+    staggered: stagUnit ? { names: stagUnit.names, positions: stagUnit.positions, ...stagUnit.result } : null,
     bench: benchResult ? { names: benchUnit.names, positions: benchUnit.positions, ...benchResult } : null,
-    weightNote,
+    weights, weightNote,
     ...blended,
-    viability: startResult.viability, // grid chips still reflect the starting-five composition specifically
-    quality: startResult.quality, stats: startResult.stats, // detail view player rows default to starters
+    viability: startResult.viability,
+    quality: startResult.quality, stats: startResult.stats,
     record: projectRecord(blended.netrtg)
   });
 }
@@ -877,7 +915,7 @@ function renderGrid() {
       <div class="team-name">${t.abbr}</div>
       <div class="starters-line">${t.names.join(' · ')}</div>
       <div class="net-row"><span class="net-value ${cls}">${t.netrtg>=0?'+':''}${t.netrtg.toFixed(1)}</span><span class="net-label">Net Rtg</span></div>
-      <div class="sub-ratings">ORtg ${t.ortg} &nbsp;·&nbsp; DRtg ${t.drtg} &nbsp;·&nbsp; Proj ${t.record.wins}-${t.record.losses}${t.bench ? ' &nbsp;·&nbsp; 10-man blend' : ' &nbsp;·&nbsp; starters only'}</div>
+      <div class="sub-ratings">ORtg ${t.ortg} &nbsp;·&nbsp; DRtg ${t.drtg} &nbsp;·&nbsp; Proj ${t.record.wins}-${t.record.losses}${t.bench ? ' &nbsp;·&nbsp; rotation-adaptive' : ' &nbsp;·&nbsp; starters only'}</div>
       <div class="chip-row">${chips.join('')}</div>
     </div>`;
   }).join('');
@@ -910,14 +948,9 @@ function openDetail(abbr) {
   if (!t) return;
   const panel = document.getElementById('detailPanel');
 
-  const notesHtml = t.starters.viability.notes.length
-    ? t.starters.viability.notes.map(n => `<div>⚠ ${n}</div>`).join('')
+  const notesFor = unit => unit.viability.notes.length
+    ? unit.viability.notes.map(n => `<div>⚠ ${n}</div>`).join('')
     : '<div style="color:var(--green);">No structural concerns flagged</div>';
-  const benchNotesHtml = t.bench
-    ? (t.bench.viability.notes.length
-        ? t.bench.viability.notes.map(n => `<div>⚠ ${n}</div>`).join('')
-        : '<div style="color:var(--green);">No structural concerns flagged</div>')
-    : '<div style="color:var(--text-muted);">No usable bench unit -- depth chart incomplete beyond starters</div>';
 
   panel.innerHTML = `
     <button class="detail-close" onclick="closeDetail()">✕</button>
@@ -933,17 +966,23 @@ function openDetail(abbr) {
     <div class="section-label">Projected 82-Game Record (directional only)</div>
     <div style="font-size:1.1rem;font-weight:700;margin-bottom:0.8rem;">${t.record.wins}-${t.record.losses}</div>
 
-    <div class="section-label">Starting Five &nbsp;<span style="color:var(--text-muted);font-weight:400;">(NetRtg ${t.starters.netrtg>=0?'+':''}${t.starters.netrtg.toFixed(1)}, ~${STARTER_MPG} min/player)</span></div>
+    <div class="section-label">Starters ${t.weights ? `&nbsp;<span style="color:var(--accent);font-weight:700;">${Math.round(t.weights.start*100)}%</span>` : ''} &nbsp;<span style="color:var(--text-muted);font-weight:400;">(NetRtg ${t.starters.netrtg>=0?'+':''}${t.starters.netrtg.toFixed(1)})</span></div>
     <div class="player-rows">${renderUnitRows(t.starters)}</div>
-    <div class="note-list" style="margin-bottom:1rem;">${notesHtml}</div>
+    <div class="note-list" style="margin-bottom:1rem;">${notesFor(t.starters)}</div>
 
-    <div class="section-label">Bench Unit (rank-2 by position) &nbsp;<span style="color:var(--text-muted);font-weight:400;">${t.bench ? `(NetRtg ${t.bench.netrtg>=0?'+':''}${t.bench.netrtg.toFixed(1)}, ~${BENCH_MPG} min/player)` : ''}</span></div>
+    ${t.staggered ? `
+    <div class="section-label">Staggered (best 1-swap) &nbsp;<span style="color:var(--accent);font-weight:700;">${t.weights ? Math.round(t.weights.stag*100)+'%' : ''}</span> &nbsp;<span style="color:var(--text-muted);font-weight:400;">(NetRtg ${t.staggered.netrtg>=0?'+':''}${t.staggered.netrtg.toFixed(1)})</span></div>
+    <div class="player-rows">${renderUnitRows(t.staggered)}</div>
+    <div class="note-list" style="margin-bottom:1rem;">${notesFor(t.staggered)}</div>
+    ` : ''}
+
+    <div class="section-label">Bench (rank-2 by position) ${t.weights ? `&nbsp;<span style="color:var(--accent);font-weight:700;">${Math.round(t.weights.bench*100)}%</span>` : ''} &nbsp;<span style="color:var(--text-muted);font-weight:400;">${t.bench ? `(NetRtg ${t.bench.netrtg>=0?'+':''}${t.bench.netrtg.toFixed(1)})` : ''}</span></div>
     ${t.bench ? `<div class="player-rows">${renderUnitRows(t.bench)}</div>` : ''}
-    <div class="note-list">${benchNotesHtml}</div>
+    <div class="note-list">${t.bench ? notesFor(t.bench) : '<div style="color:var(--text-muted);">No usable bench unit -- depth chart incomplete beyond starters</div>'}</div>
 
     <div class="section-label">Model Detail</div>
     <div class="note-list">
-      <div>Starters fit adjustment (composition, damped): ORtg ${t.starters.ortgAdj>=0?'+':''}${t.starters.ortgAdj.toFixed(2)} / DRtg ${t.starters.drtgAdj>=0?'+':''}${t.starters.drtgAdj.toFixed(2)}</div>
+      <div>Weights are adaptive: a demonstrably weak unit gets shortened toward its floor rather than playing a fixed share regardless of quality (real coaching behavior).</div>
       <div>Defense source: ${Object.keys(DEFENSE).length ? 'live DEF_SCORE where available' : 'box-score approximation (defense-cache empty)'}</div>
     </div>
   `;
