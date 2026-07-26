@@ -109,8 +109,8 @@ select { background:var(--surface); border:1px solid var(--border); border-radiu
 <div class="header">
   <div class="header-inner">
     <h1>Season Projections</h1>
-    <span class="tag">v1 — starting five</span>
-    <div class="header-subtitle">Live starting-five NetRtg projections, built from Depth Charts, RealValue ratings, and Lineup Forge's composition model.</div>
+    <span class="tag">v2 — 10-man rotation</span>
+    <div class="header-subtitle">Live NetRtg projections blending starters and primary bench unit by realistic minutes, built from Depth Charts, RealValue ratings, and Lineup Forge's composition model.</div>
   </div>
 </div>
 
@@ -508,9 +508,14 @@ function getQuality(hhName) {
   age = ageFromBirthday(bday);
   let rat365 = rawRat365;
   let am = 1.0;
-  if (age !== null && !isRookieFlag) {
-    const expApprox = Math.max(1, Math.floor(age - 19));
-    am = ageMult(age, AVG_AGE, expApprox);
+  if (age !== null) {
+    // True rookies have zero prior NBA seasons -- exp_years=0 is the
+    // correct input here, not an approximation from age. Under RealValue's
+    // formula that produces close to the maximum youth multiplier, which
+    // is the intended behavior (a young, highly-drafted rookie should get
+    // real upside credit, not just a flat draft-position number).
+    const expYears = isRookieFlag ? 0 : Math.max(1, Math.floor(age - 19));
+    am = ageMult(age, AVG_AGE, expYears);
     rat365 = rawRat365 * am;
   }
   return { hh_name: hhName, rat365, age, ageMult: am, rawWatermark: rawRat365, isRookie: isRookieFlag };
@@ -735,20 +740,72 @@ async function boot() {
     const ages = Object.values(LIVE_RATINGS).map(p => ageFromBirthday(p.birthday)).filter(a => a !== null);
     if (ages.length) AVG_AGE = ages.reduce((a,b)=>a+b,0) / ages.length;
 
-    setStatus('Projecting starting fives...');
-    TEAM_RESULTS = [];
-    const teams = Object.keys(PREDICTIONS.teams || {});
-    for (const abbr of teams) {
-      const teamData = PREDICTIONS.teams[abbr];
-      const starters = teamData.starters || {};
-      const names = POSITIONS_ORDER.map(pos => starters[pos]).filter(Boolean);
-      if (names.length < 5) { TEAM_RESULTS.push({ abbr, error: 'incomplete depth chart' }); continue; }
-      const positions = POSITIONS_ORDER.filter(pos => starters[pos]);
-      const realPositions = names.map(n => POSITIONS[n] || POSITIONS[hhToNba(n)] || positions[names.indexOf(n)]);
-      const result = projectLineup(names, realPositions);
-      if (result.error) { TEAM_RESULTS.push({ abbr, names, error: result.error }); continue; }
-      TEAM_RESULTS.push({ abbr, names, positions: realPositions, ...result, record: projectRecord(result.netrtg) });
-    }
+// Realistic minutes distribution: 240 team-minutes/game (5 x 48), starters
+// getting the bulk, primary bench unit getting meaningfully less. This is
+// what turns "the starting five's rate stats" into "the team's actual
+// expected performance" -- a team doesn't play 48 minutes of its starters.
+const STARTER_MPG = 32;
+const BENCH_MPG = 17;
+
+function resolveUnitNames(posMap) {
+  const names = POSITIONS_ORDER.map(pos => posMap[pos]).filter(Boolean);
+  if (names.length < 5) return null;
+  const positions = POSITIONS_ORDER.filter(pos => posMap[pos]);
+  const realPositions = names.map(n => POSITIONS[n] || POSITIONS[hhToNba(n)] || positions[names.indexOf(n)]);
+  return { names, positions: realPositions };
+}
+
+setStatus('Projecting starting fives and bench units...');
+TEAM_RESULTS = [];
+const teams = Object.keys(PREDICTIONS.teams || {});
+for (const abbr of teams) {
+  const teamData = PREDICTIONS.teams[abbr];
+  const starterMap = teamData.starters || {};
+  const benchMap = teamData.bench || {};
+  // Rank-2 at each position -- the primary bench unit, same positional
+  // shape as the starters (one PG/SG/SF/PF/C), taken directly from the
+  // depth chart's own ordering.
+  const benchRank2 = {};
+  for (const pos of POSITIONS_ORDER) benchRank2[pos] = (benchMap[pos] || [])[0] || null;
+
+  const startUnit = resolveUnitNames(starterMap);
+  if (!startUnit) { TEAM_RESULTS.push({ abbr, error: 'incomplete depth chart' }); continue; }
+  const startResult = projectLineup(startUnit.names, startUnit.positions);
+  if (startResult.error) { TEAM_RESULTS.push({ abbr, names: startUnit.names, error: startResult.error }); continue; }
+
+  const benchUnit = resolveUnitNames(benchRank2);
+  let benchResult = null;
+  if (benchUnit) {
+    const br = projectLineup(benchUnit.names, benchUnit.positions);
+    if (!br.error) benchResult = br;
+  }
+
+  let blended, weightNote;
+  if (benchResult) {
+    const wStart = 5 * STARTER_MPG, wBench = 5 * BENCH_MPG, wTotal = wStart + wBench;
+    const ortg = (startResult.ortg * wStart + benchResult.ortg * wBench) / wTotal;
+    const drtg = (startResult.drtg * wStart + benchResult.drtg * wBench) / wTotal;
+    blended = { ortg: Math.round(ortg*10)/10, drtg: Math.round(drtg*10)/10, netrtg: Math.round((ortg-drtg)*10)/10 };
+    weightNote = `${wStart}+${wBench} of ${wTotal} min/game modeled (starters @ ${STARTER_MPG} MPG, bench @ ${BENCH_MPG} MPG)`;
+  } else {
+    // No usable bench unit for this team (incomplete depth chart bench
+    // slots) -- fall back to starters-only rather than fail the team,
+    // flagged clearly so it's not confused with a real 10-man projection.
+    blended = { ortg: startResult.ortg, drtg: startResult.drtg, netrtg: startResult.netrtg };
+    weightNote = 'starters only -- bench unit incomplete in the depth chart';
+  }
+
+  TEAM_RESULTS.push({
+    abbr, names: startUnit.names, positions: startUnit.positions,
+    starters: { names: startUnit.names, positions: startUnit.positions, ...startResult },
+    bench: benchResult ? { names: benchUnit.names, positions: benchUnit.positions, ...benchResult } : null,
+    weightNote,
+    ...blended,
+    viability: startResult.viability, // grid chips still reflect the starting-five composition specifically
+    quality: startResult.quality, stats: startResult.stats, // detail view player rows default to starters
+    record: projectRecord(blended.netrtg)
+  });
+}
 
     loading.style.display = 'none';
     document.getElementById('statsBar').style.display = 'grid';
@@ -820,7 +877,7 @@ function renderGrid() {
       <div class="team-name">${t.abbr}</div>
       <div class="starters-line">${t.names.join(' · ')}</div>
       <div class="net-row"><span class="net-value ${cls}">${t.netrtg>=0?'+':''}${t.netrtg.toFixed(1)}</span><span class="net-label">Net Rtg</span></div>
-      <div class="sub-ratings">ORtg ${t.ortg} &nbsp;·&nbsp; DRtg ${t.drtg} &nbsp;·&nbsp; Proj ${t.record.wins}-${t.record.losses}</div>
+      <div class="sub-ratings">ORtg ${t.ortg} &nbsp;·&nbsp; DRtg ${t.drtg} &nbsp;·&nbsp; Proj ${t.record.wins}-${t.record.losses}${t.bench ? ' &nbsp;·&nbsp; 10-man blend' : ' &nbsp;·&nbsp; starters only'}</div>
       <div class="chip-row">${chips.join('')}</div>
     </div>`;
   }).join('');
@@ -831,49 +888,62 @@ function renderGrid() {
 document.getElementById('searchInput').addEventListener('input', renderGrid);
 document.getElementById('sortSelect').addEventListener('change', renderGrid);
 
-function openDetail(abbr) {
-  const t = TEAM_RESULTS.find(r => r.abbr === abbr);
-  if (!t) return;
-  const panel = document.getElementById('detailPanel');
-  const rows = t.names.map((n, i) => {
-    const q = t.quality[i];
-    const s = t.stats[i];
+function renderUnitRows(unit) {
+  return unit.names.map((n, i) => {
+    const q = unit.quality[i];
+    const s = unit.stats[i];
     const rookieTag = q.isRookie ? ' <span style="color:var(--accent);font-weight:600;">ROOKIE — neutral value</span>' : '';
-    const fallbackTag = (s && s.usedFallback) ? ` <span style="color:var(--orange);font-weight:600;">stats from ${s.statsSeason} (injured/DNP 2025-26)</span>` : '';
+    const fallbackTag = (s && s.usedFallback) ? ` <span style="color:var(--orange);font-weight:600;">stats from ${s.statsSeason}</span>` : '';
     const ageStr = q.age !== null ? `age ${q.age.toFixed(1)}` : '';
     const defStr = q.def_score !== null && q.def_score !== undefined ? `DEF ${q.def_score.toFixed(1)}` : '';
     return `<div class="player-row">
-      <div class="pos">${t.positions[i]}</div>
+      <div class="pos">${unit.positions[i]}</div>
       <div class="pname">${n}<span class="sub">${ageStr}${ageStr&&defStr?' · ':''}${defStr}${rookieTag}${fallbackTag}</span></div>
       <div class="prating">${q.rat365.toFixed(1)}</div>
       <div class="pcontrib">off ${q.off_contrib>=0?'+':''}${q.off_contrib.toFixed(2)} / def ${q.def_contrib>=0?'+':''}${q.def_contrib.toFixed(2)}</div>
     </div>`;
   }).join('');
+}
 
-  const notesHtml = t.viability.notes.length
-    ? t.viability.notes.map(n => `<div>⚠ ${n}</div>`).join('')
+function openDetail(abbr) {
+  const t = TEAM_RESULTS.find(r => r.abbr === abbr);
+  if (!t) return;
+  const panel = document.getElementById('detailPanel');
+
+  const notesHtml = t.starters.viability.notes.length
+    ? t.starters.viability.notes.map(n => `<div>⚠ ${n}</div>`).join('')
     : '<div style="color:var(--green);">No structural concerns flagged</div>';
+  const benchNotesHtml = t.bench
+    ? (t.bench.viability.notes.length
+        ? t.bench.viability.notes.map(n => `<div>⚠ ${n}</div>`).join('')
+        : '<div style="color:var(--green);">No structural concerns flagged</div>')
+    : '<div style="color:var(--text-muted);">No usable bench unit -- depth chart incomplete beyond starters</div>';
 
   panel.innerHTML = `
     <button class="detail-close" onclick="closeDetail()">✕</button>
     <div class="detail-header">
-      <h2>${t.abbr} — Starting Five Projection</h2>
+      <h2>${t.abbr} — Team Projection</h2>
     </div>
     <div class="detail-metrics">
       <div class="m"><div class="l">NetRtg</div><div class="v" style="color:${t.netrtg>=0?'var(--green)':'var(--red)'}">${t.netrtg>=0?'+':''}${t.netrtg.toFixed(1)}</div></div>
       <div class="m"><div class="l">ORtg</div><div class="v">${t.ortg}</div></div>
       <div class="m"><div class="l">DRtg</div><div class="v">${t.drtg}</div></div>
     </div>
+    <div style="font-size:0.75rem;color:var(--text-muted);margin:-0.6rem 0 1rem;">${t.weightNote}</div>
     <div class="section-label">Projected 82-Game Record (directional only)</div>
     <div style="font-size:1.1rem;font-weight:700;margin-bottom:0.8rem;">${t.record.wins}-${t.record.losses}</div>
-    <div class="section-label">Starting Five</div>
-    <div class="player-rows">${rows}</div>
-    <div class="section-label">Composition Notes</div>
-    <div class="note-list">${notesHtml}</div>
+
+    <div class="section-label">Starting Five &nbsp;<span style="color:var(--text-muted);font-weight:400;">(NetRtg ${t.starters.netrtg>=0?'+':''}${t.starters.netrtg.toFixed(1)}, ~${STARTER_MPG} min/player)</span></div>
+    <div class="player-rows">${renderUnitRows(t.starters)}</div>
+    <div class="note-list" style="margin-bottom:1rem;">${notesHtml}</div>
+
+    <div class="section-label">Bench Unit (rank-2 by position) &nbsp;<span style="color:var(--text-muted);font-weight:400;">${t.bench ? `(NetRtg ${t.bench.netrtg>=0?'+':''}${t.bench.netrtg.toFixed(1)}, ~${BENCH_MPG} min/player)` : ''}</span></div>
+    ${t.bench ? `<div class="player-rows">${renderUnitRows(t.bench)}</div>` : ''}
+    <div class="note-list">${benchNotesHtml}</div>
+
     <div class="section-label">Model Detail</div>
     <div class="note-list">
-      <div>Fit adjustment (composition, damped): ORtg ${t.ortgAdj>=0?'+':''}${t.ortgAdj.toFixed(2)} / DRtg ${t.drtgAdj>=0?'+':''}${t.drtgAdj.toFixed(2)}</div>
-      <div>TS efficiency shift: ${t.tsBonus>=0?'+':''}${t.tsBonus.toFixed(2)}</div>
+      <div>Starters fit adjustment (composition, damped): ORtg ${t.starters.ortgAdj>=0?'+':''}${t.starters.ortgAdj.toFixed(2)} / DRtg ${t.starters.drtgAdj>=0?'+':''}${t.starters.drtgAdj.toFixed(2)}</div>
       <div>Defense source: ${Object.keys(DEFENSE).length ? 'live DEF_SCORE where available' : 'box-score approximation (defense-cache empty)'}</div>
     </div>
   `;
