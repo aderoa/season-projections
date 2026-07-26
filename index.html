@@ -109,8 +109,8 @@ select { background:var(--surface); border:1px solid var(--border); border-radiu
 <div class="header">
   <div class="header-inner">
     <h1>Season Projections</h1>
-    <span class="tag">v2 — 10-man rotation</span>
-    <div class="header-subtitle">Live NetRtg projections blending starters and primary bench unit by realistic minutes, built from Depth Charts, RealValue ratings, and Lineup Forge's composition model.</div>
+    <span class="tag">v3 — 15-man rotation</span>
+    <div class="header-subtitle">Live NetRtg projections weighted across the real top lineup combinations (starter/backup/third-string), built from Depth Charts, RealValue ratings, and Lineup Forge's composition model.</div>
   </div>
 </div>
 
@@ -727,7 +727,7 @@ async function loadPredictions() {
 // 2025-26 season): average share of team possessions by lineup usage
 // rank. Needs to be true top-level (not inside boot()) since both boot()
 // and openDetail() reference it.
-const EMPIRICAL_RANK_SHARES = [0.0738, 0.0415, 0.0339, 0.0267, 0.0231, 0.0194, 0.0174, 0.0154, 0.0146, 0.0137];
+const EMPIRICAL_RANK_SHARES = [0.0738, 0.0415, 0.0339, 0.0267, 0.0231, 0.0194, 0.0174, 0.0154, 0.0146, 0.0137, 0.0126, 0.0119, 0.0113, 0.0107, 0.0103, 0.0098, 0.0094, 0.0091, 0.0088, 0.0085];
 const RANK_WEIGHT_SUM = EMPIRICAL_RANK_SHARES.reduce((a,b) => a+b, 0);
 const RANK_WEIGHTS = EMPIRICAL_RANK_SHARES.map(s => s / RANK_WEIGHT_SUM);
 
@@ -810,20 +810,31 @@ function resolveUnitNames(posMap) {
   return { names, positions };
 }
 
-function generateAndRankCombos(startUnit, benchUnit) {
+function generateAndRankCombos(units) {
+  // units is an array of 2 or 3 depth-level options per position (starter,
+  // backup, and optionally third-string), each {names, positions} arrays
+  // of length 5. Generates base-N combos across all 5 positions --
+  // 2 units = 32 combos, 3 units = 243 -- fully tractable to evaluate
+  // exhaustively since per-player quality/stats are cached, so the real
+  // cost is only the ~15 distinct players a team can draw from, not the
+  // combo count itself.
+  const n = units.length;
+  const total = Math.pow(n, 5);
   const combos = [];
-  for (let mask = 0; mask < 32; mask++) {
-    const names = [], positions = [];
+  for (let code = 0; code < total; code++) {
+    const names = [], positions = [], whichUnit = [];
+    let c = code;
     for (let i = 0; i < 5; i++) {
-      const useBench = (mask & (1 << i)) !== 0;
-      names.push(useBench ? benchUnit.names[i] : startUnit.names[i]);
-      positions.push(useBench ? benchUnit.positions[i] : startUnit.positions[i]);
+      const which = c % n; c = Math.floor(c / n);
+      names.push(units[which].names[i]);
+      positions.push(units[which].positions[i]);
+      whichUnit.push(which);
     }
     const result = projectLineup(names, positions);
-    if (!result.error) combos.push({ mask, names, positions, result });
+    if (!result.error) combos.push({ code, names, positions, whichUnit, result });
   }
   combos.sort((a, b) => b.result.netrtg - a.result.netrtg);
-  return combos.slice(0, 10);
+  return combos.slice(0, 20);
 }
 
 setStatus('Evaluating 32 lineup combinations per team...');
@@ -833,8 +844,11 @@ for (const abbr of teams) {
   const teamData = PREDICTIONS.teams[abbr];
   const starterMap = teamData.starters || {};
   const benchMap = teamData.bench || {};
-  const benchRank2 = {};
-  for (const pos of POSITIONS_ORDER) benchRank2[pos] = (benchMap[pos] || [])[0] || null;
+  const benchRank2 = {}, benchRank3 = {};
+  for (const pos of POSITIONS_ORDER) {
+    benchRank2[pos] = (benchMap[pos] || [])[0] || null;
+    benchRank3[pos] = (benchMap[pos] || [])[1] || null;
+  }
 
   const startUnit = resolveUnitNames(starterMap);
   if (!startUnit) { TEAM_RESULTS.push({ abbr, error: 'incomplete depth chart' }); continue; }
@@ -842,20 +856,40 @@ for (const abbr of teams) {
   if (startResult.error) { TEAM_RESULTS.push({ abbr, names: startUnit.names, error: startResult.error }); continue; }
 
   const benchUnit = resolveUnitNames(benchRank2);
-  let top10 = null, blended, weightNote;
+  const thirdUnit = resolveUnitNames(benchRank3);
+  let top20 = null, blended, weightNote, comboCount = 0;
   if (benchUnit) {
     const br = projectLineup(benchUnit.names, benchUnit.positions);
-    if (!br.error) top10 = generateAndRankCombos(startUnit, benchUnit);
+    if (!br.error) {
+      // Prefer the full 3-deep combo space (243) when a third-string unit
+      // is available for every position; fall back to 2-deep (32) rather
+      // than failing the team when the depth chart doesn't go that deep
+      // everywhere.
+      let tr = thirdUnit ? projectLineup(thirdUnit.names, thirdUnit.positions) : null;
+      if (thirdUnit && !tr.error) {
+        top20 = generateAndRankCombos([startUnit, benchUnit, thirdUnit]);
+        comboCount = 243;
+      } else {
+        top20 = generateAndRankCombos([startUnit, benchUnit]);
+        comboCount = 32;
+      }
+    }
   }
 
-  if (top10 && top10.length === 10) {
+  const nUsed = top20 ? Math.min(20, top20.length) : 0;
+  if (top20 && nUsed >= 10) {
+    // Renormalize the real empirical weights across however many combos
+    // actually came back (usually 20, but a shallow bench can yield fewer)
+    const wSlice = RANK_WEIGHTS.slice(0, nUsed);
+    const wSum = wSlice.reduce((a,b) => a+b, 0);
+    const w = wSlice.map(x => x / wSum);
     let ortg = 0, drtg = 0;
-    for (let i = 0; i < 10; i++) {
-      ortg += top10[i].result.ortg * RANK_WEIGHTS[i];
-      drtg += top10[i].result.drtg * RANK_WEIGHTS[i];
+    for (let i = 0; i < nUsed; i++) {
+      ortg += top20[i].result.ortg * w[i];
+      drtg += top20[i].result.drtg * w[i];
     }
     blended = { ortg: Math.round(ortg*10)/10, drtg: Math.round(drtg*10)/10, netrtg: Math.round((ortg-drtg)*10)/10 };
-    weightNote = `Weighted across the 10 best of 32 possible lineup combinations (starter/backup at each position), using the real minutes-share-by-usage-rank curve measured from lineups.db.`;
+    weightNote = `Weighted across the ${nUsed} best of ${comboCount} possible lineup combinations (starter/backup${comboCount===243?'/third-string':''} at each position), using the real minutes-share-by-usage-rank curve measured from lineups.db.`;
   } else {
     blended = { ortg: startResult.ortg, drtg: startResult.drtg, netrtg: startResult.netrtg };
     weightNote = 'starters only -- bench unit incomplete in the depth chart';
@@ -864,7 +898,7 @@ for (const abbr of teams) {
   TEAM_RESULTS.push({
     abbr, names: startUnit.names, positions: startUnit.positions,
     starters: { names: startUnit.names, positions: startUnit.positions, ...startResult },
-    top10, weightNote,
+    top10: top20, weightNote,
     ...blended,
     viability: startResult.viability,
     quality: startResult.quality, stats: startResult.stats,
@@ -968,7 +1002,7 @@ function renderGrid() {
       <div class="team-name">${t.abbr}</div>
       <div class="starters-line">${t.names.join(' · ')}</div>
       <div class="net-row"><span class="net-value ${cls}">${t.record.wins}-${t.record.losses}</span><span class="net-label">Proj Record</span></div>
-      <div class="sub-ratings">NetRtg ${t.netrtg>=0?'+':''}${t.netrtg.toFixed(1)} &nbsp;·&nbsp; ORtg ${t.ortg} &nbsp;·&nbsp; DRtg ${t.drtg}${t.top10 ? ' &nbsp;·&nbsp; top-10-of-32' : ' &nbsp;·&nbsp; starters only'}</div>
+      <div class="sub-ratings">NetRtg ${t.netrtg>=0?'+':''}${t.netrtg.toFixed(1)} &nbsp;·&nbsp; ORtg ${t.ortg} &nbsp;·&nbsp; DRtg ${t.drtg}${t.top10 ? ` &nbsp;·&nbsp; top-${t.top10.length}-of-${t.top10.length > 10 ? 243 : 32}` : ' &nbsp;·&nbsp; starters only'}</div>
       <div class="chip-row">${chips.join('')}</div>
     </div>`;
   }).join('');
@@ -1019,10 +1053,12 @@ function openDetail(abbr) {
 
   let top10Html = '';
   if (t.top10) {
+    const unitStyle = ['font-weight:700;', 'color:var(--text-muted);', 'color:var(--accent);font-style:italic;'];
     top10Html = t.top10.map((combo, i) => {
-      const isStart = j => (combo.mask & (1 << j)) === 0;
-      const nameSpans = combo.names.map((n, j) => isStart(j)
-        ? `<b>${n}</b>` : `<span style="color:var(--text-muted);">${n}</span>`).join(' · ');
+      const nameSpans = combo.names.map((n, j) => {
+        const which = combo.whichUnit ? combo.whichUnit[j] : ((combo.mask & (1 << j)) ? 1 : 0);
+        return `<span style="${unitStyle[which] || ''}">${n}</span>`;
+      }).join(' · ');
       return `<div class="player-row" style="grid-template-columns:2rem 1fr auto;">
         <div class="pos">#${i+1}</div>
         <div class="pname" style="font-weight:400;">${nameSpans}</div>
@@ -1048,7 +1084,7 @@ function openDetail(abbr) {
     <div class="note-list" style="margin-bottom:1rem;">${notesFor(t.starters)}</div>
 
     ${t.top10 ? `
-    <div class="section-label">Top 10 of 32 Possible Combinations &nbsp;<span style="color:var(--text-muted);font-weight:400;">(bold = starter, gray = backup; % = real minutes-share weight)</span></div>
+    <div class="section-label">Top ${t.top10.length} of ${t.top10.length > 10 ? 243 : 32} Possible Combinations &nbsp;<span style="color:var(--text-muted);font-weight:400;">(bold = starter, gray = backup, italic = third-string; % = real minutes-share weight)</span></div>
     <div class="player-rows">${top10Html}</div>
     ` : '<div class="note-list"><div style="color:var(--text-muted);">Bench unit incomplete -- using starters only</div></div>'}
 
