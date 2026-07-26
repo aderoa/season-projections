@@ -303,7 +303,10 @@ async function loadDefenseData() {
     const headers = rows[headerIdx];
     const idx = {};
     headers.forEach((h, i) => { idx[(h||'').trim().toUpperCase()] = i; });
-    if (idx.PLAYER === undefined || idx.DEF_SCORE === undefined) return {};
+    if (idx.PLAYER === undefined || idx.DEF_SCORE === undefined) {
+      console.warn('[DEF DEBUG] Column detection failed. idx:', idx, 'header row:', headers);
+      return {};
+    }
     const result = {};
     for (let i = headerIdx + 1; i < rows.length; i++) {
       const row = rows[i];
@@ -311,8 +314,13 @@ async function loadDefenseData() {
       const score = parseFloat(row[idx.DEF_SCORE]);
       if (name && !isNaN(score)) result[name] = { def_score: score };
     }
+    console.log('[DEF DEBUG] idx.DEF_SCORE =', idx.DEF_SCORE, '| total parsed:', Object.keys(result).length);
+    for (const testName of ['Shai Gilgeous-Alexander', 'Cason Wallace', 'Jalen Williams', 'Chet Holmgren', 'Isaiah Hartenstein']) {
+      console.log('[DEF DEBUG]', testName, '->', result[testName], '| raw row match:',
+        rows.find(r => (r[idx.PLAYER]||'').trim() === testName));
+    }
     return result;
-  } catch (e) { return {}; }
+  } catch (e) { console.warn('[DEF DEBUG] loadDefenseData threw:', e); return {}; }
 }
 
 async function loadPositionData() {
@@ -536,6 +544,9 @@ function getDefenseQuality(hhName) {
   const d = computeWeightedDefScore(hhName);
   const result = d ? { def_score: d.effective, source: d.source } : null;
   _defenseCache2[hhName] = result;
+  if (['Shai Gilgeous-Alexander', 'Cason Wallace', 'Jalen Williams', 'Chet Holmgren', 'Isaiah Hartenstein'].includes(hhName)) {
+    console.log('[DEF DEBUG] getDefenseQuality(', hhName, ') ->', result, '| DEFENSE[name] was:', DEFENSE[hhName]);
+  }
   return result;
 }
 
