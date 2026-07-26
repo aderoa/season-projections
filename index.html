@@ -116,8 +116,8 @@ select { background:var(--surface); border:1px solid var(--border); border-radiu
 
 <div class="stats-bar" id="statsBar" style="display:none;">
   <div class="stat-card"><div class="label">Teams Projected</div><div class="value" id="statTeams">—</div></div>
-  <div class="stat-card"><div class="label">Best Projected NetRtg</div><div class="value" id="statBest">—</div></div>
-  <div class="stat-card"><div class="label">League Avg NetRtg</div><div class="value" id="statAvg">—</div></div>
+  <div class="stat-card"><div class="label">Best Projected Record</div><div class="value" id="statBest">—</div></div>
+  <div class="stat-card"><div class="label">League Avg Record</div><div class="value" id="statAvg">—</div></div>
   <div class="stat-card"><div class="label">Live DEF_SCORE</div><div class="value" id="statDef">—</div></div>
 </div>
 
@@ -129,7 +129,7 @@ select { background:var(--surface); border:1px solid var(--border); border-radiu
   <div class="filter-group">
     <label>Sort</label>
     <select id="sortSelect">
-      <option value="net">Projected NetRtg</option>
+      <option value="net">Projected Record</option>
       <option value="ortg">Projected ORtg</option>
       <option value="drtg">Projected DRtg</option>
       <option value="az">Team A–Z</option>
@@ -848,8 +848,34 @@ for (const abbr of teams) {
     ...blended,
     viability: startResult.viability,
     quality: startResult.quality, stats: startResult.stats,
-    record: projectRecord(blended.netrtg)
   });
+}
+
+// League-wide recentering. A league's total wins always equal total
+// losses, so the average NetRtg across all 30 teams must be exactly 0
+// for the average projected record to land on 41-41 -- it won't by
+// default, since the model has no built-in mechanism forcing that (an
+// accumulated bias from how ratings/defense/composition compound can
+// shift the whole league's average away from zero). Fix: measure the
+// actual average and subtract it from everyone, splitting the shift
+// evenly between ORtg and DRtg so the ORtg-DRtg=NetRtg identity still
+// holds on every card. Applied consistently to the top-level number,
+// the starting five, and every one of the top-10 combos, so the detail
+// view stays internally consistent with the headline number.
+{
+  const valid = TEAM_RESULTS.filter(t => !t.error);
+  const shift = valid.reduce((s,t) => s + t.netrtg, 0) / valid.length;
+  const recenter = (obj) => {
+    obj.ortg = Math.round((obj.ortg - shift/2) * 10) / 10;
+    obj.drtg = Math.round((obj.drtg + shift/2) * 10) / 10;
+    obj.netrtg = Math.round((obj.ortg - obj.drtg) * 10) / 10;
+  };
+  for (const t of valid) {
+    recenter(t);
+    recenter(t.starters);
+    if (t.top10) for (const combo of t.top10) recenter(combo.result);
+    t.record = projectRecord(t.netrtg);
+  }
 }
 
     loading.style.display = 'none';
@@ -871,9 +897,9 @@ function renderStats() {
   document.getElementById('statTeams').textContent = `${ok.length} / 30`;
   if (ok.length) {
     const best = ok.reduce((a,b) => a.netrtg > b.netrtg ? a : b);
-    const avg = ok.reduce((s,t) => s+t.netrtg, 0) / ok.length;
-    document.getElementById('statBest').textContent = `${best.abbr} ${best.netrtg>=0?'+':''}${best.netrtg.toFixed(1)}`;
-    document.getElementById('statAvg').textContent = `${avg>=0?'+':''}${avg.toFixed(1)}`;
+    const avgWins = ok.reduce((s,t) => s+t.record.wins, 0) / ok.length;
+    document.getElementById('statBest').textContent = `${best.abbr} ${best.record.wins}-${best.record.losses}`;
+    document.getElementById('statAvg').textContent = `${avgWins.toFixed(1)}-${(82-avgWins).toFixed(1)}`;
   }
   const defCount = Object.keys(DEFENSE).length;
   document.getElementById('statDef').innerHTML = defCount > 0
@@ -921,8 +947,8 @@ function renderGrid() {
       <div class="rank">#${i+1}</div>
       <div class="team-name">${t.abbr}</div>
       <div class="starters-line">${t.names.join(' · ')}</div>
-      <div class="net-row"><span class="net-value ${cls}">${t.netrtg>=0?'+':''}${t.netrtg.toFixed(1)}</span><span class="net-label">Net Rtg</span></div>
-      <div class="sub-ratings">ORtg ${t.ortg} &nbsp;·&nbsp; DRtg ${t.drtg} &nbsp;·&nbsp; Proj ${t.record.wins}-${t.record.losses}${t.top10 ? ' &nbsp;·&nbsp; top-10-of-32' : ' &nbsp;·&nbsp; starters only'}</div>
+      <div class="net-row"><span class="net-value ${cls}">${t.record.wins}-${t.record.losses}</span><span class="net-label">Proj Record</span></div>
+      <div class="sub-ratings">NetRtg ${t.netrtg>=0?'+':''}${t.netrtg.toFixed(1)} &nbsp;·&nbsp; ORtg ${t.ortg} &nbsp;·&nbsp; DRtg ${t.drtg}${t.top10 ? ' &nbsp;·&nbsp; top-10-of-32' : ' &nbsp;·&nbsp; starters only'}</div>
       <div class="chip-row">${chips.join('')}</div>
     </div>`;
   }).join('');
@@ -991,13 +1017,11 @@ function openDetail(abbr) {
       <h2>${t.abbr} — Team Projection</h2>
     </div>
     <div class="detail-metrics">
-      <div class="m"><div class="l">NetRtg</div><div class="v" style="color:${t.netrtg>=0?'var(--green)':'var(--red)'}">${t.netrtg>=0?'+':''}${t.netrtg.toFixed(1)}</div></div>
+      <div class="m"><div class="l">Proj Record</div><div class="v" style="color:${t.netrtg>=0?'var(--green)':'var(--red)'}">${t.record.wins}-${t.record.losses}</div></div>
       <div class="m"><div class="l">ORtg</div><div class="v">${t.ortg}</div></div>
       <div class="m"><div class="l">DRtg</div><div class="v">${t.drtg}</div></div>
     </div>
-    <div style="font-size:0.75rem;color:var(--text-muted);margin:-0.6rem 0 1rem;">${t.weightNote}</div>
-    <div class="section-label">Projected 82-Game Record (directional only)</div>
-    <div style="font-size:1.1rem;font-weight:700;margin-bottom:0.8rem;">${t.record.wins}-${t.record.losses}</div>
+    <div style="font-size:0.75rem;color:var(--text-muted);margin:-0.6rem 0 1rem;">NetRtg ${t.netrtg>=0?'+':''}${t.netrtg.toFixed(1)} &nbsp;·&nbsp; ${t.weightNote}</div>
 
     <div class="section-label">Starting Five &nbsp;<span style="color:var(--text-muted);font-weight:400;">(NetRtg ${t.starters.netrtg>=0?'+':''}${t.starters.netrtg.toFixed(1)})</span></div>
     <div class="player-rows">${renderUnitRows(t.starters)}</div>
