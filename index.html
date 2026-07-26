@@ -316,9 +316,9 @@ async function loadDefenseData() {
     }
     console.log('[DEF DEBUG] idx.DEF_SCORE =', idx.DEF_SCORE, '| total parsed:', Object.keys(result).length);
     for (const testName of ['Shai Gilgeous-Alexander', 'Cason Wallace', 'Jalen Williams', 'Chet Holmgren', 'Isaiah Hartenstein']) {
-      const rawRow = rows.find(r => (r[idx.PLAYER]||'').trim() === testName);
+      const allMatches = rows.filter(r => (r[idx.PLAYER]||'').trim() === testName);
       console.log('[DEF DEBUG]', testName, '-> parsed:', JSON.stringify(result[testName]),
-        '| raw sheet row:', JSON.stringify(rawRow));
+        '| occurrences in sheet:', allMatches.length, '| all rows:', JSON.stringify(allMatches));
     }
     return result;
   } catch (e) { console.warn('[DEF DEBUG] loadDefenseData threw:', e); return {}; }
