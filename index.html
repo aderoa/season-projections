@@ -835,24 +835,35 @@ function generateAndRankCombos(units) {
   }
   combos.sort((a, b) => b.result.netrtg - a.result.netrtg);
 
-  // Cap any single player's appearances across the selected top-20 set.
-  // Without this, a clearly-elite player (confirmed directly: Wembanyama
-  // appeared in all 20 of SAS's selected combos) dominates every single
-  // selection, since nearly every combo including him outranks nearly
-  // every combo that doesn't -- but no real team plays its best player in
-  // literally 100% of representative rotation combinations. Greedy
-  // selection in quality order, skipping any combo that would push a
-  // player past the cap, keeps quality-first ranking while guaranteeing
-  // real diversity -- the selected 20 won't be the pure top-20 by netrtg
-  // anymore, by design.
-  const MAX_APPEARANCES = 10; // out of 20 selected -- no player exceeds half
-  const playerCount = {};
+  // Cap any single player's appearances across the selected top-20 set,
+  // both by raw count and by cumulative weighted share. Count alone isn't
+  // enough: the weight curve is heavily front-loaded (rank 1 gets ~26% of
+  // the total weight, rank 20 gets ~2%), so a dominant player could hit
+  // the count cap using only the highest-weighted slots and still end up
+  // credited with far more than half the total minutes. No real player,
+  // however good, realistically plays anywhere close to 100% of a team's
+  // minutes -- 65% of total weighted share is a defensible real-world
+  // ceiling (a player who's literally always on the floor in every
+  // representative combination still isn't playing all 48 minutes).
+  // Confirmed directly: without this, Wembanyama appeared in all 20 of
+  // SAS's selected combos.
+  const MAX_APPEARANCES = 10;   // out of 20 selected -- no player exceeds half by count
+  const MAX_WEIGHT_SHARE = 0.65; // fraction of total weighted share (RANK_WEIGHTS sums to 1.0)
+  const playerCount = {}, playerWeight = {};
   const selected = [];
   for (const combo of combos) {
     if (selected.length >= 20) break;
-    if (combo.names.some(name => (playerCount[name] || 0) >= MAX_APPEARANCES)) continue;
+    const slotWeight = RANK_WEIGHTS[selected.length];
+    const violates = combo.names.some(name =>
+      (playerCount[name] || 0) >= MAX_APPEARANCES ||
+      (playerWeight[name] || 0) + slotWeight > MAX_WEIGHT_SHARE
+    );
+    if (violates) continue;
     selected.push(combo);
-    for (const name of combo.names) playerCount[name] = (playerCount[name] || 0) + 1;
+    for (const name of combo.names) {
+      playerCount[name] = (playerCount[name] || 0) + 1;
+      playerWeight[name] = (playerWeight[name] || 0) + slotWeight;
+    }
   }
   return selected;
 }
