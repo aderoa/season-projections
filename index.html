@@ -656,7 +656,26 @@ function viabilityAdjustments(players, positions) {
 // ~12 -- not like a player who contributes nothing at all. Built once
 // from the live population after all data loads, then reused via
 // simple K-nearest-neighbors by rating distance.
+//
+// UNCERTAINTY DISCOUNT: confirmed directly that this could be gamed --
+// a rookie's rating-tier average showed low usage/assist (typical for
+// a low-rated player), and the model used that projected trait to fully
+// relieve a real "Handler stacking" penalty on Houston's starting five,
+// as if a low-assist rookie were as reliable a fact as a real player's
+// proven low-assist role. It isn't: the rating-tier average is a
+// reasonable point estimate, but an unproven player carries genuine
+// additional uncertainty about whether they'll actually play that way.
+// Fix: blend the tier-specific profile with a league-wide neutral
+// baseline (the average of ALL rated players, not just similarly-rated
+// ones) -- this pulls a rookie's projected traits back toward "we don't
+// really know," which specifically weakens their ability to single-
+// handedly relieve a composition penalty via an assumed trait, without
+// changing their own rating-based off/def contribution (which was
+// already appropriately conservative for a low pick).
+const ROOKIE_UNCERTAINTY_WEIGHT = 0.5; // 0 = fully trust tier average, 1 = fully neutral/league-average
+
 let RATING_TIER_POPULATION = [];
+let LEAGUE_AVG_PROFILE = null;
 
 function buildRatingTierPopulation() {
   const pop = [];
@@ -671,6 +690,15 @@ function buildRatingTierPopulation() {
       fg3p: stats.fg3p, fg3a: stats.fg3a, blk: stats.blk,
       def_score: defQ ? defQ.def_score : null,
     });
+  }
+  if (pop.length) {
+    const avg = key => pop.reduce((s, p) => s + (p[key] || 0), 0) / pop.length;
+    const defVals = pop.filter(p => p.def_score !== null).map(p => p.def_score);
+    LEAGUE_AVG_PROFILE = {
+      usg: avg('usg'), ast_pct: avg('ast_pct'), reb_pct: avg('reb_pct'),
+      fg3p: avg('fg3p'), fg3a: avg('fg3a'), blk: avg('blk'),
+      def_score: defVals.length ? defVals.reduce((a,b)=>a+b,0)/defVals.length : DEF_CALIB,
+    };
   }
   return pop;
 }
@@ -689,10 +717,18 @@ function averageFitForRating(targetRat365) {
   const avg = key => nearest.reduce((s, p) => s + (p[key] || 0), 0) / nearest.length;
   const defVals = nearest.filter(p => p.def_score !== null).map(p => p.def_score);
   const avgDef = defVals.length ? defVals.reduce((a, b) => a + b, 0) / defVals.length : DEF_CALIB;
-  return {
+  const tierFit = {
     usg: avg('usg'), ast_pct: avg('ast_pct'), reb_pct: avg('reb_pct'),
     fg3p: avg('fg3p'), fg3a: avg('fg3a'), blk: avg('blk'),
     def_score: avgDef,
+  };
+  if (!LEAGUE_AVG_PROFILE) return tierFit;
+  const w = ROOKIE_UNCERTAINTY_WEIGHT;
+  const blend = key => tierFit[key] * (1 - w) + LEAGUE_AVG_PROFILE[key] * w;
+  return {
+    usg: blend('usg'), ast_pct: blend('ast_pct'), reb_pct: blend('reb_pct'),
+    fg3p: blend('fg3p'), fg3a: blend('fg3a'), blk: blend('blk'),
+    def_score: blend('def_score'),
   };
 }
 
