@@ -647,12 +647,63 @@ function viabilityAdjustments(players, positions) {
   return { ortgPen, drtgPen, notes };
 }
 
+// Rookie composition profile: instead of flat zeros (which meant a
+// rookie contributed nothing to any dimensional bucket or viability
+// check, and got a free pass on defense), look up real, established
+// players whose CURRENT rating is close to this rookie's projected
+// rating and average their actual stat profile. A rookie projected at
+// rat365~12 should reasonably look like real players who ARE rated
+// ~12 -- not like a player who contributes nothing at all. Built once
+// from the live population after all data loads, then reused via
+// simple K-nearest-neighbors by rating distance.
+let RATING_TIER_POPULATION = [];
+
+function buildRatingTierPopulation() {
+  const pop = [];
+  for (const [name, live] of Object.entries(LIVE_RATINGS)) {
+    if (!live.rat365 || live.rat365 <= 0) continue;
+    const stats = getStats2526(name);
+    if (!stats) continue;
+    const defQ = getDefenseQuality(name);
+    pop.push({
+      rat365: live.rat365,
+      usg: stats.usg, ast_pct: stats.ast_pct, reb_pct: stats.reb_pct,
+      fg3p: stats.fg3p, fg3a: stats.fg3a, blk: stats.blk,
+      def_score: defQ ? defQ.def_score : null,
+    });
+  }
+  return pop;
+}
+
+const RATING_TIER_K = 15; // neighbors averaged per lookup
+
+function averageFitForRating(targetRat365) {
+  if (!RATING_TIER_POPULATION.length) {
+    return { usg: 0.15, ast_pct: 0.10, reb_pct: 0.08, fg3p: 0.33, fg3a: 1.5, blk: 0.3, def_score: DEF_CALIB };
+  }
+  const nearest = RATING_TIER_POPULATION
+    .map(p => ({ p, dist: Math.abs(p.rat365 - targetRat365) }))
+    .sort((a, b) => a.dist - b.dist)
+    .slice(0, RATING_TIER_K)
+    .map(x => x.p);
+  const avg = key => nearest.reduce((s, p) => s + (p[key] || 0), 0) / nearest.length;
+  const defVals = nearest.filter(p => p.def_score !== null).map(p => p.def_score);
+  const avgDef = defVals.length ? defVals.reduce((a, b) => a + b, 0) / defVals.length : DEF_CALIB;
+  return {
+    usg: avg('usg'), ast_pct: avg('ast_pct'), reb_pct: avg('reb_pct'),
+    fg3p: avg('fg3p'), fg3a: avg('fg3a'), blk: avg('blk'),
+    def_score: avgDef,
+  };
+}
+
 function projectLineup(names, positions) {
   const quality = [];
   for (const n of names) {
     const q = getQuality(n);
     if (!q) return { error: `no data for ${n}` };
-    const d = q.isRookie ? null : getDefenseQuality(n);
+    // Rookies now get the average real DEF_SCORE of players near their
+    // projected rating tier, instead of a flat null/neutral pass.
+    const d = q.isRookie ? { def_score: averageFitForRating(q.rat365).def_score, source: 'rating-tier-avg' } : getDefenseQuality(n);
     const defScore = d ? d.def_score : null;
     const defContrib = defScore !== null ? (defScore - DEF_CALIB) * DEF_SCALE : 0;
     const defAboveAvg = (defScore !== null ? defScore : DEF_CALIB) - DEF_CALIB;
@@ -665,7 +716,12 @@ function projectLineup(names, positions) {
 
   const stats = [];
   for (let i = 0; i < names.length; i++) {
-    if (quality[i].isRookie) { stats.push({usg:0, ast_pct:0, reb_pct:0, fg3p:0, fg3a:0, blk:0, rat365:quality[i].rat365, isRookie:true}); continue; }
+    if (quality[i].isRookie) {
+      const fit = averageFitForRating(quality[i].rat365);
+      stats.push({usg: fit.usg, ast_pct: fit.ast_pct, reb_pct: fit.reb_pct, fg3p: fit.fg3p, fg3a: fit.fg3a, blk: fit.blk,
+        rat365: quality[i].rat365, isRookie: true});
+      continue;
+    }
     const s = getStats2526(names[i]);
     if (!s) return { error: `no 2025-26 stats for ${names[i]}` };
     stats.push({...s, rat365: quality[i].rat365, isRookie:false});
@@ -673,16 +729,18 @@ function projectLineup(names, positions) {
 
   const oBase = coefs.meta.baseline_ortg_resid_mean || 0;
   const dBase = coefs.meta.baseline_drtg_resid_mean || 0;
-  // Rookies are excluded from every dimensional bucket count -- no real
-  // stat profile exists to classify them by (see rookieRating comment).
-  const nonRookieStats = stats.filter(s => !s.isRookie);
-  const normalized = normalizeLineupUsages(nonRookieStats);
+  // Rookies now count toward dimensional buckets using their rating-tier
+  // average-fit profile (real players near their projected rating level),
+  // not excluded outright -- that exclusion made sense when their stats
+  // were flat zeros with no informational content, but an average-fit
+  // profile is a genuine, if approximate, composition signal.
+  const normalized = normalizeLineupUsages(stats);
   const dims = [
     ['n_high_usg', normalized.filter(p => p.usg_norm >= USG_HIGH).length],
-    ['n_shooters', nonRookieStats.filter(p => p.fg3p >= SHOOT_OK && p.fg3a >= SHOOT_MIN_3PA).length],
-    ['n_rim_protect', nonRookieStats.filter(p => p.blk >= BLK_HIGH).length],
-    ['n_playmakers', nonRookieStats.filter(p => p.ast_pct >= AST_HIGH).length],
-    ['n_rebounders', nonRookieStats.filter(p => p.reb_pct >= REB_HIGH).length],
+    ['n_shooters', stats.filter(p => p.fg3p >= SHOOT_OK && p.fg3a >= SHOOT_MIN_3PA).length],
+    ['n_rim_protect', stats.filter(p => p.blk >= BLK_HIGH).length],
+    ['n_playmakers', stats.filter(p => p.ast_pct >= AST_HIGH).length],
+    ['n_rebounders', stats.filter(p => p.reb_pct >= REB_HIGH).length],
   ];
   let ortgAdj = 0, drtgAdj = 0;
   for (const [key, value] of dims) {
@@ -808,6 +866,9 @@ async function boot() {
 
     const ages = Object.values(LIVE_RATINGS).map(p => ageFromBirthday(p.birthday)).filter(a => a !== null);
     if (ages.length) AVG_AGE = ages.reduce((a,b)=>a+b,0) / ages.length;
+
+    setStatus('Building rating-tier population for rookie fit...');
+    RATING_TIER_POPULATION = buildRatingTierPopulation();
 
 // Real-world rotation modeling. lineups.db shows even a team's single
 // most-used 5-man combo only accounts for ~7% of total possessions, and
@@ -1096,7 +1157,7 @@ function renderUnitRows(unit) {
   return unit.names.map((n, i) => {
     const q = unit.quality[i];
     const s = unit.stats[i];
-    const rookieTag = q.isRookie ? ' <span style="color:var(--accent);font-weight:600;">ROOKIE — neutral value</span>' : '';
+    const rookieTag = q.isRookie ? ' <span style="color:var(--accent);font-weight:600;">ROOKIE — avg fit for rating tier</span>' : '';
     const fallbackTag = (s && s.usedFallback) ? ` <span style="color:var(--orange);font-weight:600;">stats from ${s.statsSeason}</span>` : '';
     const ageStr = q.age !== null ? `age ${q.age.toFixed(1)}` : '';
     const defStr = q.def_score !== null && q.def_score !== undefined ? `DEF ${q.def_score.toFixed(1)}` : '';
