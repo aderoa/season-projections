@@ -233,6 +233,28 @@ const ROOKIE_AGE_DECAY = 0.5;      // RealValue's AGE_DECAY
 const ROOKIE_MIN_AGE = 19.3;       // RealValue's MIN_ROOKIE_AGE
 const MAX_ROOKIE_RATING = 14.0;    // calibrated against Cooper Flagg's real rat365
 
+// Direct combo-level uncertainty discount, scaled inversely by draft
+// position: a true consensus #1 pick is a far more known quantity than
+// a #45 pick, even though both are equally unproven at the NBA level --
+// so even the best picks get a small, real discount (never zero), while
+// later picks get a substantially larger one. Uses the same exponential
+// shape as rookieRating's draftFactor, inverted, so the scale is
+// consistent with how draft position already affects rating elsewhere.
+const ROOKIE_DISCOUNT_MIN = 0.5;  // applied even to a #1 overall pick
+const ROOKIE_DISCOUNT_MAX = 3.5;  // applied to the latest picks (~#60)
+
+function rookieUncertaintyDiscount(quality) {
+  let total = 0;
+  for (const q of quality) {
+    if (!q.isRookie) continue;
+    const dp = q.draftPos && q.draftPos >= 1 && q.draftPos <= 60 ? q.draftPos : 60;
+    const draftFactor = Math.exp(-ROOKIE_DRAFT_DECAY * (dp - 1));
+    const uncertaintyFactor = 1 - draftFactor; // 0 at pick 1, ->1 at pick 60
+    total += ROOKIE_DISCOUNT_MIN + (ROOKIE_DISCOUNT_MAX - ROOKIE_DISCOUNT_MIN) * uncertaintyFactor;
+  }
+  return total;
+}
+
 const POSITIONS_ORDER = ['PG','SG','SF','PF','C'];
 const TODAY = new Date('2026-07-25'); // matches this session's live-data snapshots
 
@@ -577,7 +599,8 @@ function _computeQuality(hhName) {
     am = ageMult(age, AVG_AGE, expYears);
     rat365 = rawRat365 * am;
   }
-  return { hh_name: hhName, rat365, age, ageMult: am, rawWatermark: rawRat365, isRookie: isRookieFlag };
+  return { hh_name: hhName, rat365, age, ageMult: am, rawWatermark: rawRat365, isRookie: isRookieFlag,
+    draftPos: isRookieFlag ? live.draftPos : null };
 }
 
 function getDefenseQuality(hhName) {
@@ -792,11 +815,28 @@ function projectLineup(names, positions) {
 
   const displayOrtg = LEAGUE_BASE + totalOff + ortgAdj;
   const displayDrtg = LEAGUE_BASE - totalDef + drtgAdj;
-  const ortg = displayOrtg + tsBonus - via.ortgPen;
-  const drtg = displayDrtg + via.drtgPen;
-  const netrtg = (totalOff + totalDef) + fitNet + tsBonus - via.ortgPen - via.drtgPen;
+  let ortg = displayOrtg + tsBonus - via.ortgPen;
+  let drtg = displayDrtg + via.drtgPen;
+  let netrtg = (totalOff + totalDef) + fitNet + tsBonus - via.ortgPen - via.drtgPen;
 
-  return { quality, stats, totalOff, totalDef, ortgAdj, drtgAdj, tsBonus, viability: via,
+  // Direct uncertainty discount for any rookie in the lineup, scaled by
+  // draft position -- a real coach trusts a consensus #1 pick far more
+  // than a #45 pick, even before either has played an NBA game. Applied
+  // directly to netrtg (split evenly across ortg/drtg to preserve the
+  // identity) rather than folded into the stat profile, so it holds
+  // regardless of which specific mechanism (individual rating or a
+  // composition-check benefit) is driving a rookie-inclusive combo's
+  // ranking -- confirmed necessary directly: profile-blending alone
+  // didn't change an outcome where a rookie's low-usage projection
+  // matched the league-wide average anyway.
+  const rookieDiscount = rookieUncertaintyDiscount(quality);
+  if (rookieDiscount > 0) {
+    ortg -= rookieDiscount / 2;
+    drtg += rookieDiscount / 2;
+    netrtg -= rookieDiscount;
+  }
+
+  return { quality, stats, totalOff, totalDef, ortgAdj, drtgAdj, tsBonus, viability: via, rookieDiscount,
     ortg: Math.round(ortg*10)/10, drtg: Math.round(drtg*10)/10, netrtg: Math.round(netrtg*10)/10 };
 }
 
@@ -1236,9 +1276,11 @@ function openDetail(abbr) {
         const which = combo.whichUnit ? combo.whichUnit[j] : ((combo.mask & (1 << j)) ? 1 : 0);
         return `<span style="${unitStyle[which] || ''}">${n}</span>`;
       }).join(' · ');
+      const discNote = combo.result.rookieDiscount > 0
+        ? ` <span style="color:var(--orange);font-size:0.65rem;">(−${combo.result.rookieDiscount.toFixed(1)} rookie discount)</span>` : '';
       return `<div class="player-row" style="grid-template-columns:2rem 1fr auto;">
         <div class="pos">#${i+1}</div>
-        <div class="pname" style="font-weight:400;">${nameSpans}</div>
+        <div class="pname" style="font-weight:400;">${nameSpans}${discNote}</div>
         <div class="prating">${combo.result.netrtg>=0?'+':''}${combo.result.netrtg.toFixed(1)} <span style="color:var(--text-muted);font-weight:400;">(${Math.round(RANK_WEIGHTS[i]*100)}%)</span></div>
       </div>`;
     }).join('');
@@ -1268,6 +1310,7 @@ function openDetail(abbr) {
     <div class="section-label">Model Detail</div>
     <div class="note-list">
       <div>Weights come from the real, empirically-measured share of team possessions by lineup usage rank (lineups.db, 2025-26) -- not an assumed split.</div>
+      <div>Rookie-inclusive combos carry a direct uncertainty discount scaled by draft position (−0.5 for a #1 pick up to −3.5 for late picks), shown inline where it applies.</div>
       <div>Defense source: ${Object.keys(DEFENSE).length ? 'live DEF_SCORE where available' : 'box-score approximation (defense-cache empty)'}</div>
     </div>
   `;
