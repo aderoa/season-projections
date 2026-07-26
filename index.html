@@ -135,7 +135,7 @@ select { background:var(--surface); border:1px solid var(--border); border-radiu
       <option value="az">Team A–Z</option>
     </select>
   </div>
-  <button class="ctrl-btn" id="refreshBtn" onclick="boot()">↻ Refresh</button>
+  <button class="ctrl-btn" id="refreshBtn">↻ Refresh</button>
 </div>
 
 <div class="container">
@@ -151,7 +151,7 @@ select { background:var(--surface); border:1px solid var(--border); border-radiu
   Data: <a href="https://hoopsmatic.com" target="_blank">HoopsMatic</a> Depth Charts, RealValue &amp; Lineup Forge. Projections are a model, not a guarantee — treat as directional.
 </div>
 
-<div class="detail-overlay" id="detailOverlay" onclick="if(event.target===this) closeDetail()">
+<div class="detail-overlay" id="detailOverlay">
   <div class="detail-panel" id="detailPanel"></div>
 </div>
 
@@ -917,7 +917,7 @@ function renderGrid() {
       ...(rookieCount ? [`<span class="chip rookie">${rookieCount} rookie${rookieCount>1?'s':''}</span>`] : []),
     ];
     if (!chips.length) chips.push('<span class="chip ok">No structural flags</span>');
-    return `<div class="team-card" onclick="openDetail('${t.abbr}')">
+    return `<div class="team-card" data-abbr="${t.abbr}">
       <div class="rank">#${i+1}</div>
       <div class="team-name">${t.abbr}</div>
       <div class="starters-line">${t.names.join(' · ')}</div>
@@ -928,10 +928,22 @@ function renderGrid() {
   }).join('');
 
   if (!list.length) grid.innerHTML = '<div style="grid-column:1/-1;text-align:center;padding:3rem;color:var(--text-muted);">No teams match.</div>';
+
+  // Real event listeners instead of inline onclick -- more robust in
+  // general (some hosting setups silently block inline HTML event
+  // handler attributes via CSP while the main script still runs fine,
+  // which would explain clicks doing nothing with no visible JS error).
+  grid.querySelectorAll('.team-card').forEach(card => {
+    card.addEventListener('click', () => openDetail(card.dataset.abbr));
+  });
 }
 
 document.getElementById('searchInput').addEventListener('input', renderGrid);
 document.getElementById('sortSelect').addEventListener('change', renderGrid);
+document.getElementById('refreshBtn').addEventListener('click', boot);
+document.getElementById('detailOverlay').addEventListener('click', (e) => {
+  if (e.target === e.currentTarget) closeDetail();
+});
 
 function renderUnitRows(unit) {
   return unit.names.map((n, i) => {
@@ -974,7 +986,7 @@ function openDetail(abbr) {
   }
 
   panel.innerHTML = `
-    <button class="detail-close" onclick="closeDetail()">✕</button>
+    <button class="detail-close" data-action="close">✕</button>
     <div class="detail-header">
       <h2>${t.abbr} — Team Projection</h2>
     </div>
@@ -1003,6 +1015,7 @@ function openDetail(abbr) {
     </div>
   `;
   document.getElementById('detailOverlay').classList.add('active');
+  panel.querySelector('[data-action="close"]').addEventListener('click', closeDetail);
 }
 function closeDetail() { document.getElementById('detailOverlay').classList.remove('active'); }
 
