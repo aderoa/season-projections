@@ -389,7 +389,16 @@ function computeWeightedRat365(hhName) {
   const rows = [];
   while (stmt.step()) rows.push(stmt.getAsObject());
   stmt.free();
-  if (!rows.length && currentRat365 === null) return null;
+  // TRUE rookies (zero qualifying NBA seasons ever) must return null here
+  // regardless of what their live rat365 happens to be. The bug: a rookie
+  // with a live rm-tv roster row showing rat365=0 (the normal case for
+  // someone who hasn't played an NBA game) was passing this check because
+  // 0 !== null in JS -- so they fell through to a false "has data" result
+  // instead of being correctly flagged as a rookie, and the whole team's
+  // projection failed downstream at getStats2526 (which correctly found
+  // nothing, since they've truly never played). rows.length is the right
+  // signal: it reflects real playerDb history, not just any live entry.
+  if (!rows.length) return null;
 
   const curYear = seasonStartYear(CURRENT_SEASON);
   let tw = 0, twt = 0, curGP = 0;
