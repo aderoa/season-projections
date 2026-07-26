@@ -316,8 +316,9 @@ async function loadDefenseData() {
     }
     console.log('[DEF DEBUG] idx.DEF_SCORE =', idx.DEF_SCORE, '| total parsed:', Object.keys(result).length);
     for (const testName of ['Shai Gilgeous-Alexander', 'Cason Wallace', 'Jalen Williams', 'Chet Holmgren', 'Isaiah Hartenstein']) {
-      console.log('[DEF DEBUG]', testName, '->', result[testName], '| raw row match:',
-        rows.find(r => (r[idx.PLAYER]||'').trim() === testName));
+      const rawRow = rows.find(r => (r[idx.PLAYER]||'').trim() === testName);
+      console.log('[DEF DEBUG]', testName, '-> parsed:', JSON.stringify(result[testName]),
+        '| raw sheet row:', JSON.stringify(rawRow));
     }
     return result;
   } catch (e) { console.warn('[DEF DEBUG] loadDefenseData threw:', e); return {}; }
@@ -545,7 +546,8 @@ function getDefenseQuality(hhName) {
   const result = d ? { def_score: d.effective, source: d.source } : null;
   _defenseCache2[hhName] = result;
   if (['Shai Gilgeous-Alexander', 'Cason Wallace', 'Jalen Williams', 'Chet Holmgren', 'Isaiah Hartenstein'].includes(hhName)) {
-    console.log('[DEF DEBUG] getDefenseQuality(', hhName, ') ->', result, '| DEFENSE[name] was:', DEFENSE[hhName]);
+    console.log('[DEF DEBUG] getDefenseQuality(', hhName, ') -> result:', JSON.stringify(result),
+      '| DEFENSE[name] was:', JSON.stringify(DEFENSE[hhName]));
   }
   return result;
 }
