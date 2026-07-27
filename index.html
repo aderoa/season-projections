@@ -2546,6 +2546,31 @@ for (const abbr of teams) {
     weightNote = 'starters only -- bench unit incomplete in the depth chart';
   }
 
+  // Direct, additive team-level stacking penalty, based on the starting
+  // five's own strong-count (not diluted across the weighted combo
+  // blend). Confirmed necessary directly: the per-combo discount only
+  // fires when multiple strong players share a SPECIFIC combo
+  // simultaneously, and most of the 16-20 weighted combos mix in a
+  // bench player that breaks that overlap -- so a 30% per-combo
+  // discount only moved NYK's final blended netrtg by 0.6, even though
+  // it moved the starting-five-alone number by 1.5. Multiplicative
+  // scaling doesn't work here either: pre-recentering netrtg sits near
+  // zero for every team (the real signal is the ~21-point spread
+  // between teams, not the near-zero raw average), so multiplying a
+  // near-zero number by a discount barely changes it. An additive
+  // penalty, scaled the same way (per strong player beyond the first
+  // 2), directly and predictably reduces a stacked roster's relative
+  // standing regardless of how the weighted blend distributes across
+  // combos.
+  const TEAM_STACKING_RATE = 1.75;
+  const teamStrongCount = startResult.strongCount || 0;
+  const teamStackingPenalty = TEAM_STACKING_RATE * Math.max(0, teamStrongCount - 2);
+  if (teamStackingPenalty > 0) {
+    blended.ortg = Math.round((blended.ortg - teamStackingPenalty/2) * 10) / 10;
+    blended.drtg = Math.round((blended.drtg + teamStackingPenalty/2) * 10) / 10;
+    blended.netrtg = Math.round((blended.ortg - blended.drtg) * 10) / 10;
+  }
+
   TEAM_RESULTS.push({
     abbr, names: startUnit.names, positions: startUnit.positions,
     starters: { names: startUnit.names, positions: startUnit.positions, ...startResult },
