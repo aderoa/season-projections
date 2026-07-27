@@ -213,7 +213,7 @@ const POS_URL          = `https://sheets.googleapis.com/v4/spreadsheets/${POS_SH
 const USG_HIGH = 0.25, SHOOT_OK = 0.35, SHOOT_MIN_3PA = 2.0;
 const AST_HIGH = 0.20, REB_HIGH = 0.10, BLK_HIGH = 1.0;
 const OFF_CALIB = 12, OFF_SCALE = 0.25;
-const DEF_CALIB = 10, DEF_SCALE = 0.18;
+const DEF_CALIB = 10;
 const LEAGUE_BASE = 115;
 
 // User-adjustable model parameters, exposed via the Tune Model panel.
@@ -229,15 +229,23 @@ const DEFAULT_SETTINGS = {
   // selection bias in the single top-ranked combo). Still adjustable
   // via the Search Confidence slider if some correction is wanted back.
   shrinkageRetention: 1.0,
-  // How much of a player's defensive value gets subtracted from rat365
-  // before computing their offensive contribution. Confirmed directly:
-  // at the original 0.5, elite-defense rosters (OKC) saw rat365's
-  // isolated contribution go NEGATIVE, since so much of it got
-  // attributed to defense and stripped out -- DEF_SCORE (a fully
-  // separate live metric) ended up doing nearly all the work, with
-  // rat365/watermark barely mattering. Lower = more of rat365 comes
-  // through unmodified = watermark more dominant relative to DEF_SCORE.
-  defToRatFactor: 0.5,
+  // rat365/watermark should be the BASE that represents player quality
+  // (better players make a better team, full stop), with defense, fit,
+  // and lineup composition as modulations ON TOP of that base -- not
+  // separate, competing, equally-weighted inputs added into the same
+  // sum. The old architecture treated off_contrib (rat365-derived) and
+  // def_contrib (DEF_SCORE-derived) as two independent, similarly-scaled
+  // terms, which is why an elite-defense roster like OKC could see
+  // DEF_SCORE completely dominate and even flip rat365's own
+  // contribution negative (confirmed directly with real data). Two
+  // changes together fix this:
+  // (1) rat365 no longer gets defense subtracted out of it before use --
+  // 0 = fully preserved, the full watermark value carries through.
+  defToRatFactor: 0,
+  // (2) DEF_SCORE's own scale is reduced from the original 0.18 (which
+  // matched closely to OFF_SCALE=0.25, letting it compete on nearly
+  // even terms) so it acts as a real but secondary modulation.
+  defScale: 0.07,
   teamStackingRate: 1.75,
   homeAdvantage: 3.0,
   rookieDiscountMax: 3.5,
@@ -872,7 +880,7 @@ function projectLineup(names, positions) {
     // projected rating tier, instead of a flat null/neutral pass.
     const d = q.isRookie ? { def_score: averageFitForRating(q.rat365).def_score, source: 'rating-tier-avg' } : getDefenseQuality(n);
     const defScore = d ? d.def_score : null;
-    const defContrib = defScore !== null ? (defScore - DEF_CALIB) * DEF_SCALE : 0;
+    const defContrib = defScore !== null ? (defScore - DEF_CALIB) * SETTINGS.defScale : 0;
     const defAboveAvg = (defScore !== null ? defScore : DEF_CALIB) - DEF_CALIB;
     const offRat = q.rat365 - defAboveAvg * SETTINGS.defToRatFactor;
     const offContrib = (offRat - OFF_CALIB) * OFF_SCALE;
@@ -2791,8 +2799,10 @@ const TUNE_SCHEMA = [
     desc: 'Largest discount applied to a combo including a true rookie -- scaled down for higher draft picks, this is the ceiling for the latest picks.' },
   { key: 'sampleDiscountMax', label: 'Thin-Sample Uncertainty (max)', min: 0, max: 6, step: 0.5,
     desc: 'Largest discount applied to a combo including a non-rookie with under ~250 career games -- tapers to zero as career games increase.' },
-  { key: 'defToRatFactor', label: 'Defense Offset (lower = rat365 more dominant)', min: 0, max: 1, step: 0.05,
-    desc: 'How much of a player\'s defensive value gets subtracted from rat365 before computing offense. At the default, elite-defense rosters can see rat365\'s contribution go negative, with DEF_SCORE (a separate live metric) doing nearly all the work. Lower this to make the watermark/rat365 rating matter more relative to DEF_SCORE.' },
+  { key: 'defToRatFactor', label: 'Defense-out-of-rat365 (0 = watermark fully preserved)', min: 0, max: 1, step: 0.05,
+    desc: 'How much of a player\'s defensive value gets subtracted from rat365 before it\'s used as their base quality. Set to 0 by default so the full watermark value carries through unmodified -- raise this only if you want rat365 to get partially "offense-only" isolated again.' },
+  { key: 'defScale', label: 'Defense Modulation Strength', min: 0, max: 0.25, step: 0.01,
+    desc: 'How much DEF_SCORE adjusts a player\'s value on top of their rat365 base. Reduced from the original 0.18 (which let defense compete with rat365 on nearly even terms) so defense acts as a real but secondary modulation, not a co-equal input.' },
 ];
 
 function renderTunePanel() {
