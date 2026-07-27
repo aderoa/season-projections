@@ -428,6 +428,17 @@ const TODAY = new Date('2026-07-25'); // matches this session's live-data snapsh
 
 let playerDb = null, coefs = null, NAME_DICT = {}, POSITIONS = {}, DEFENSE = {};
 let LIVE_RATINGS = {}; // HH name -> {rat365, birthday, draftPos}
+let HISTORICAL_RAT_BY_PLAYER = {}; // lowercase NBA name -> [{year, totalRat, games}, ...]
+// Real historical Total RAT per season, read directly from the same
+// rm-tv sheet fetch's history blocks (columns G-J) -- NOT derived from
+// PIE. This data was already being parsed (parseRmTv below) but never
+// actually wired into the watermark computation, which fell back to a
+// PIE-based approximation instead. Confirmed directly this was a real
+// gap: Tyrese Haliburton (0 games this season, missed to injury) came
+// out to a "solid starter" 13.36 from the PIE approximation despite
+// being a real top-13 player -- PIE structurally undervalues pass-first
+// playmakers. Real Total RAT data doesn't have this problem since it's
+// the actual computed rating, not a box-score reconstruction of it.
 let PREDICTIONS = null;
 
 // =====================================================
@@ -596,51 +607,85 @@ function hhToNba(hhName) {
   return hhName;
 }
 
+// Real watermark computation, ported directly from RealValue's own
+// logic (see globalratingplus reference) -- using real historical Total
+// RAT data from the rm-tv sheet's history blocks, not a PIE-based
+// reconstruction. RAT_RECENCY_DECAY=0.6 (not the 0.65 used elsewhere in
+// this file for the separate defense fallback) matches RealValue's own
+// SEASON_WEIGHT exactly: 1.0, 0.6, 0.36, 0.216, 0.1296 for the current
+// season back through four years prior.
+const RAT_RECENCY_DECAY = 0.6;
+const RAT_EXPECTED_GAMES = 82;
+const GAMES_BETA = 0.8;
+const GAMES_MAX_MULT = 2.5;
+const GAMES_MIN_PCT = 0.25;
+const GP_AGE_THRESHOLD = 28; // age at which the games-correction starts fading
+const GP_AGE_DECAY = 0.12;
+
+// Corrects a season's per-game RAT for how few games were actually
+// played -- a player who played 20 of 82 games at a high per-game rate
+// gets some credit for that pace, capped and age-faded so this doesn't
+// overcorrect for older players who are more likely genuinely declining
+// rather than just unlucky with injuries.
+function gpCorr(rawPerGame, expected, actual, playerAge) {
+  const pct = actual / expected;
+  if (pct < GAMES_MIN_PCT) return rawPerGame;
+  const rawMult = Math.max(1.0, Math.min(GAMES_MAX_MULT, Math.pow(expected / actual, GAMES_BETA)));
+  if (playerAge !== null && playerAge > GP_AGE_THRESHOLD) {
+    const fade = Math.exp(-GP_AGE_DECAY * (playerAge - GP_AGE_THRESHOLD));
+    const boost = (rawMult - 1.0) * fade;
+    return rawPerGame * (1.0 + boost);
+  }
+  return rawPerGame * rawMult;
+}
+
 function computeWeightedRat365(hhName) {
   const nbaName = hhToNba(hhName);
   const live = LIVE_RATINGS[hhName];
   const currentRat365 = live ? live.rat365 : null;
-  const stmt = playerDb.prepare(`SELECT a.SEASON, CAST(a.GP AS INTEGER) as GP, CAST(a.PIE AS REAL) as PIE,
-      CAST(a.DREB_PCT AS REAL) as DREB_PCT, CAST(b.BLK AS REAL) as BLK, CAST(b.STL AS REAL) as STL
-    FROM player_advanced a LEFT JOIN player_base b
-      ON a.PLAYER_NAME=b.PLAYER_NAME AND a.SEASON=b.SEASON AND a.SEASON_TYPE=b.SEASON_TYPE
-    WHERE a.PLAYER_NAME=? AND a.SEASON_TYPE='Regular Season' AND CAST(a.GP AS INTEGER)>=?
-    ORDER BY a.SEASON DESC`);
-  stmt.bind([nbaName, MIN_SEASON_GP]);
-  const rows = [];
-  while (stmt.step()) rows.push(stmt.getAsObject());
-  stmt.free();
-  // TRUE rookies (zero qualifying NBA seasons ever) must return null here
-  // regardless of what their live rat365 happens to be. The bug: a rookie
-  // with a live rm-tv roster row showing rat365=0 (the normal case for
-  // someone who hasn't played an NBA game) was passing this check because
-  // 0 !== null in JS -- so they fell through to a false "has data" result
-  // instead of being correctly flagged as a rookie, and the whole team's
-  // projection failed downstream at getStats2526 (which correctly found
-  // nothing, since they've truly never played). rows.length is the right
-  // signal: it reflects real playerDb history, not just any live entry.
-  if (!rows.length) return null;
+  const age = live ? ageFromBirthday(live.birthday) : null;
+
+  const hist = HISTORICAL_RAT_BY_PLAYER[nbaName.toLowerCase()] || [];
+  // TRUE rookies (zero historical record, ever) must return null here --
+  // a live rat365 of 0 for someone who hasn't played isn't a real signal
+  // (see the isRookieFlag logic downstream, which depends on this).
+  if (!hist.length) return null;
 
   const curYear = seasonStartYear(CURRENT_SEASON);
-  let tw = 0, twt = 0, curGP = 0;
-  for (const r of rows) {
-    const yd = curYear - seasonStartYear(r.SEASON);
-    if (yd < 0) continue;
-    const w = r.GP * Math.pow(RECENCY_DECAY, yd);
-    let rat;
-    if (r.SEASON === CURRENT_SEASON && currentRat365 !== null) rat = currentRat365;
-    else rat = pieToRat365(r.PIE, boxScoreDefComposite(r.BLK, r.STL, r.DREB_PCT));
-    tw += rat*w; twt += w;
-    if (r.SEASON === CURRENT_SEASON) curGP = r.GP;
+  let num = 0, den = 0, priorNum = 0, priorDen = 0, curGP = 0;
+  for (const h of hist) {
+    const yd = curYear - seasonStartYear(h.year);
+    if (yd < 0 || h.games <= 0) continue;
+    const w = Math.pow(RAT_RECENCY_DECAY, yd);
+    let perGame = h.totalRat / h.games;
+    perGame = gpCorr(perGame, RAT_EXPECTED_GAMES, h.games, age);
+    num += perGame * w * h.games;
+    den += w * h.games;
+    if (h.year !== CURRENT_SEASON) {
+      priorNum += perGame * w * h.games;
+      priorDen += w * h.games;
+    } else {
+      curGP = h.games;
+    }
   }
-  if (twt === 0) return currentRat365 !== null ? { effective: currentRat365, currentGP: 0, totalCareerGP: rows.reduce((s,r)=>s+r.GP,0), totalCareerSeasons: rows.length } : null;
-  const blended = tw/twt;
+  const totalCareerGP = hist.reduce((s,h) => s + h.games, 0);
+  if (den === 0) return currentRat365 !== null ? { effective: currentRat365, currentGP: 0, totalCareerGP, totalCareerSeasons: hist.length } : null;
+
+  const fullWM = num / den;
+  const priorWM = priorDen > 0 ? priorNum / priorDen : fullWM;
+  // Injury protection: only kicks in for drops > 5% (filters out normal
+  // season-to-season variance), and even then the boost toward priorWM
+  // is modest and graduated by how severe the drop is -- not a full
+  // reversion, since some of a down season could be genuine decline.
   let effective;
-  if (currentRat365 === null) effective = blended;
-  else if (blended > currentRat365) effective = currentRat365 + boostFraction(curGP)*(blended-currentRat365);
-  else effective = currentRat365;
-  const totalCareerGP = rows.reduce((s,r) => s + r.GP, 0);
-  return { effective, blended, currentRat365, currentGP: curGP, totalCareerGP, totalCareerSeasons: rows.length };
+  if (priorDen > 0 && fullWM < priorWM * 0.95) {
+    const dropPct = 1 - (fullWM / priorWM);
+    const boost = dropPct > 0.20 ? 1.0 + dropPct * 0.12 : 1.0;
+    effective = priorWM * boost;
+  } else {
+    effective = fullWM;
+  }
+  return { effective, blended: fullWM, currentRat365, currentGP: curGP, totalCareerGP, totalCareerSeasons: hist.length };
 }
 
 function boxScoreDefComposite(blk, stl, drebPct) { return COMP_BLK*(blk||0) + COMP_STL*(stl||0) + COMP_DREB*(drebPct||0); }
@@ -2612,6 +2657,12 @@ async function boot() {
 
     const parsed = parseRmTv(rmTvText);
     LIVE_RATINGS = parsed.roster;
+    HISTORICAL_RAT_BY_PLAYER = {};
+    for (const h of parsed.historical) {
+      const k = h.player.toLowerCase();
+      if (!HISTORICAL_RAT_BY_PLAYER[k]) HISTORICAL_RAT_BY_PLAYER[k] = [];
+      HISTORICAL_RAT_BY_PLAYER[k].push(h);
+    }
 
     const ages = Object.values(LIVE_RATINGS).map(p => ageFromBirthday(p.birthday)).filter(a => a !== null);
     if (ages.length) AVG_AGE = ages.reduce((a,b)=>a+b,0) / ages.length;
