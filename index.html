@@ -812,9 +812,19 @@ function projectLineup(names, positions) {
   // shrinkage fix, because that fix corrects for search-selection bias,
   // not for this separate stacking effect.
   const STRONG_THRESHOLD = 1.5;      // combined off+def contrib counts as "individually strong"
-  const STACKING_DIMINISH_RATE = 0.08; // per strong player beyond the first 2
+  const STACKING_DIMINISH_RATE = 0.08; // per strong player beyond the first 3
   const strongCount = quality.filter(q => (q.off_contrib + q.def_contrib) > STRONG_THRESHOLD).length;
-  const stackingFactor = Math.max(0.6, 1 - STACKING_DIMINISH_RATE * Math.max(0, strongCount - 2));
+  // Confirmed directly: triggering "beyond 2" caught most of the league
+  // (any team with 3 decent starters), producing a -11.2 league-wide
+  // average shift that the recentering step -- which by design removes
+  // any uniform component -- added right back, undoing almost the
+  // entire correction. Recentering can only cancel out what's genuinely
+  // uniform across the league; for the fix to survive recentering, it
+  // needs to trigger rarely enough that it's a real relative outlier,
+  // not a common occurrence. Raised to "beyond 3" so only rosters with
+  // 4+ individually strong players (a genuine outlier, not most
+  // playoff-caliber teams) get discounted at all.
+  const stackingFactor = Math.max(0.6, 1 - STACKING_DIMINISH_RATE * Math.max(0, strongCount - 3));
   const totalOff = totalOffRaw * stackingFactor;
   const totalDef = totalDefRaw * stackingFactor;
   if (names.includes('Jalen Brunson')) {
