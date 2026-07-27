@@ -243,6 +243,12 @@ const MAX_ROOKIE_RATING = 14.0;    // calibrated against Cooper Flagg's real rat
 const ROOKIE_DISCOUNT_MIN = 0.5;  // applied even to a #1 overall pick
 const ROOKIE_DISCOUNT_MAX = 3.5;  // applied to the latest picks (~#60)
 
+// Regression-to-the-mean shrinkage retention (see generateAndRankCombos
+// for the full rationale). True top-level so both the combo search and
+// the starting-five calculation (which needs the identical treatment
+// for consistency -- see the team-loop below) can use the same value.
+const SHRINKAGE_RETENTION = 0.5;
+
 // Extended beyond true rookies: a player with a thin CAREER sample (e.g.
 // 40 total games, all in one season) carries real uncertainty even
 // though they technically aren't a rookie -- confirmed directly with
@@ -790,8 +796,27 @@ function projectLineup(names, positions) {
     const offContrib = (offRat - OFF_CALIB) * OFF_SCALE;
     quality.push({...q, def_score: defScore, def_contrib: defContrib, off_contrib: offContrib});
   }
-  const totalOff = quality.reduce((s,q) => s+q.off_contrib, 0);
-  const totalDef = quality.reduce((s,q) => s+q.def_contrib, 0);
+  const totalOffRaw = quality.reduce((s,q) => s+q.off_contrib, 0);
+  const totalDefRaw = quality.reduce((s,q) => s+q.def_contrib, 0);
+
+  // Diminishing returns for stacking multiple individually strong
+  // players. A purely additive model has no mechanism for this, and
+  // real basketball does: there's one ball, a finite number of shots
+  // and possessions, and defensive attention that has to go somewhere --
+  // a team with 1-2 genuine standouts performs close to the sum of its
+  // parts, but a team trying to feature 4-5 simultaneously strong
+  // players sees real friction that pure addition misses. Confirmed
+  // necessary directly: a lineup of five individually solid-to-great
+  // players (Knicks' starting five) summed to a historically
+  // unprecedented team NetRtg even after the earlier winner's-curse
+  // shrinkage fix, because that fix corrects for search-selection bias,
+  // not for this separate stacking effect.
+  const STRONG_THRESHOLD = 1.5;      // combined off+def contrib counts as "individually strong"
+  const STACKING_DIMINISH_RATE = 0.08; // per strong player beyond the first 2
+  const strongCount = quality.filter(q => (q.off_contrib + q.def_contrib) > STRONG_THRESHOLD).length;
+  const stackingFactor = Math.max(0.6, 1 - STACKING_DIMINISH_RATE * Math.max(0, strongCount - 2));
+  const totalOff = totalOffRaw * stackingFactor;
+  const totalDef = totalDefRaw * stackingFactor;
 
   const stats = [];
   for (let i = 0; i < names.length; i++) {
@@ -857,6 +882,7 @@ function projectLineup(names, positions) {
   }
 
   return { quality, stats, totalOff, totalDef, ortgAdj, drtgAdj, tsBonus, viability: via, rookieDiscount,
+    stackingFactor, strongCount,
     ortg: Math.round(ortg*10)/10, drtg: Math.round(drtg*10)/10, netrtg: Math.round(netrtg*10)/10 };
 }
 
@@ -2386,7 +2412,6 @@ function generateAndRankCombos(units) {
   // RETENTION is a judgment call (not independently calibrated against a
   // large sample of real-vs-predicted comparisons), roughly sized so the
   // Houston case lands closer to its real observed range.
-  const SHRINKAGE_RETENTION = 0.5; // fraction of each combo's deviation from the mean that's kept
   const allNetrtg = combos.map(c => c.result.netrtg);
   const comboMeanNetrtg = allNetrtg.reduce((a,b)=>a+b,0) / allNetrtg.length;
   const allOrtg = combos.map(c => c.result.ortg);
@@ -2404,7 +2429,7 @@ function generateAndRankCombos(units) {
       netrtg: Math.round((shrunkOrtg-shrunkDrtg)*10)/10 };
   }
 
-  return selected;
+  return { selected, comboMeanOrtg, comboMeanDrtg };
 }
 
 setStatus('Evaluating 32 lineup combinations per team...');
@@ -2427,7 +2452,7 @@ for (const abbr of teams) {
 
   const benchUnit = resolveUnitNames(benchRank2);
   const thirdUnit = resolveUnitNames(benchRank3);
-  let top20 = null, blended, weightNote, comboCount = 0;
+  let top20 = null, blended, weightNote, comboCount = 0, comboMeans = null;
   if (benchUnit) {
     const br = projectLineup(benchUnit.names, benchUnit.positions);
     if (!br.error) {
@@ -2436,14 +2461,35 @@ for (const abbr of teams) {
       // than failing the team when the depth chart doesn't go that deep
       // everywhere.
       let tr = thirdUnit ? projectLineup(thirdUnit.names, thirdUnit.positions) : null;
+      let comboResult;
       if (thirdUnit && !tr.error) {
-        top20 = generateAndRankCombos([startUnit, benchUnit, thirdUnit]);
+        comboResult = generateAndRankCombos([startUnit, benchUnit, thirdUnit]);
         comboCount = 243;
       } else {
-        top20 = generateAndRankCombos([startUnit, benchUnit]);
+        comboResult = generateAndRankCombos([startUnit, benchUnit]);
         comboCount = 32;
       }
+      top20 = comboResult.selected;
+      comboMeans = comboResult;
     }
+  }
+
+  // Apply the same shrinkage to the starting five that every other combo
+  // in the list gets. Without this, the starting five was the one
+  // exception left unshrunk (it's computed directly via projectLineup,
+  // separate from the searched-and-shrunk combo pool) -- confirmed
+  // directly, it was showing a meaningfully higher NetRtg than the
+  // team's own shrunk blended number, which is misleading since the
+  // detail view displays it as the headline "Starting Five" figure.
+  // Falls back to the raw value if the combo pool wasn't available
+  // (e.g. incomplete bench) since there's no mean to shrink toward.
+  if (comboMeans) {
+    const shrunkOrtg = comboMeans.comboMeanOrtg + SHRINKAGE_RETENTION * (startResult.ortg - comboMeans.comboMeanOrtg);
+    const shrunkDrtg = comboMeans.comboMeanDrtg + SHRINKAGE_RETENTION * (startResult.drtg - comboMeans.comboMeanDrtg);
+    startResult.rawOrtg = startResult.ortg; startResult.rawDrtg = startResult.drtg; startResult.rawNetrtg = startResult.netrtg;
+    startResult.ortg = Math.round(shrunkOrtg*10)/10;
+    startResult.drtg = Math.round(shrunkDrtg*10)/10;
+    startResult.netrtg = Math.round((shrunkOrtg-shrunkDrtg)*10)/10;
   }
 
   const nUsed = top20 ? Math.min(20, top20.length) : 0;
