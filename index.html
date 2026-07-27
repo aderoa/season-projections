@@ -68,6 +68,17 @@ select { background:var(--surface); border:1px solid var(--border); border-radiu
 .tune-row input[type=range] { flex:1; accent-color:var(--accent); cursor:pointer; }
 .tune-row .tune-value { font-family:'JetBrains Mono',monospace; font-size:0.75rem; color:var(--accent); min-width:2.6em; text-align:right; }
 .tune-status { font-size:0.7rem; color:var(--text-muted); margin-top:0.8rem; min-height:1em; }
+.rankings-scroll { overflow-x:auto; }
+.rankings-table { width:100%; border-collapse:collapse; font-size:0.78rem; white-space:nowrap; }
+.rankings-table th { text-align:left; padding:0.5rem 0.7rem; font-family:'JetBrains Mono',monospace; font-size:0.62rem; text-transform:uppercase; letter-spacing:0.04em; color:var(--text-muted); border-bottom:1px solid var(--border); cursor:pointer; user-select:none; }
+.rankings-table th:hover { color:var(--accent); }
+.rankings-table th.active { color:var(--accent); }
+.rankings-table td { padding:0.45rem 0.7rem; border-bottom:1px solid var(--border); font-family:'JetBrains Mono',monospace; }
+.rankings-table td.team-cell { font-family:inherit; font-weight:700; font-size:0.82rem; }
+.rankings-table tr:hover td { background:var(--accent-dim); }
+.rank-badge { font-size:0.65rem; color:var(--text-muted); margin-left:0.35em; }
+.rank-badge.good { color:#15803d; }
+.rank-badge.bad { color:#b91c1c; }
 @media(max-width:600px) { .stats-bar{grid-template-columns:1fr 1fr;gap:0.5rem;} .stat-card{padding:0.75rem;} .stat-card .value{font-size:1.1rem;} .header{padding:1.25rem 1rem 1rem;} .header h1{font-size:1.25rem;} }
 
 /* === PAGE-SPECIFIC: projection grid & detail view === */
@@ -151,9 +162,11 @@ select { background:var(--surface); border:1px solid var(--border); border-radiu
   </div>
   <button class="ctrl-btn" id="refreshBtn">↻ Refresh</button>
   <button class="ctrl-btn" id="tuneBtn">⚙ Tune Model</button>
+  <button class="ctrl-btn" id="rankingsBtn">📊 Category Rankings</button>
 </div>
 
 <div id="tunePanel" class="tune-panel" style="display:none;"></div>
+<div id="rankingsPanel" class="tune-panel" style="display:none;"></div>
 
 <div class="container">
   <div id="loading" class="loading-overlay">
@@ -947,7 +960,7 @@ function projectLineup(names, positions) {
     netrtg -= rookieDiscount;
   }
 
-  return { quality, stats, totalOff, totalDef, ortgAdj, drtgAdj, tsBonus, viability: via, rookieDiscount,
+  return { quality, stats, totalOff, totalDef, totalOffRaw, totalDefRaw, ortgAdj, drtgAdj, tsBonus, viability: via, rookieDiscount,
     stackingFactor, strongCount,
     ortg: Math.round(ortg*10)/10, drtg: Math.round(drtg*10)/10, netrtg: Math.round(netrtg*10)/10 };
 }
@@ -2612,6 +2625,7 @@ runProjections = async function() {
     ...blended,
     viability: startResult.viability,
     quality: startResult.quality, stats: startResult.stats,
+    teamStackingPenalty, teamStrongCount,
   });
 }
 
@@ -2833,6 +2847,115 @@ document.getElementById('tuneBtn').addEventListener('click', () => {
     if (!panel.innerHTML.trim()) renderTunePanel();
     panel.style.display = 'block';
     document.getElementById('tuneBtn').classList.add('active');
+  }
+});
+
+// Category rankings: breaks each team's projection down into the
+// individual mechanisms that build it (raw talent, stacking penalty,
+// lineup fit, uncertainty discounts, structural flags), each shown with
+// its rank among all 30 teams -- so instead of debugging one team's
+// number one mechanism at a time, it's visible directly which specific
+// factor is helping or hurting any given team relative to the rest of
+// the league. For "penalty"/"discount" categories, the displayed value
+// is the actual point cost (positive = cost), but ranked so LESS cost
+// ranks better (#1 = smallest penalty), matching how every other
+// column's #1 = best works.
+const RANKING_CATEGORIES = [
+  { key: 'rawTalent', label: 'Raw Talent (Off+Def)',
+    get: t => t.starters.totalOffRaw + t.starters.totalDefRaw },
+  { key: 'stackingCost', label: 'Stacking Penalty', costFraming: true,
+    get: t => ((t.starters.totalOffRaw + t.starters.totalDefRaw) - (t.starters.totalOff + t.starters.totalDef)) + (t.teamStackingPenalty || 0) },
+  { key: 'lineupFit', label: 'Lineup Fit',
+    get: t => t.starters.ortgAdj - t.starters.drtgAdj },
+  { key: 'uncertaintyCost', label: 'Uncertainty Discount', costFraming: true,
+    get: t => t.starters.rookieDiscount || 0 },
+  { key: 'structuralCost', label: 'Structural Penalty', costFraming: true,
+    get: t => (t.starters.viability.ortgPen || 0) + (t.starters.viability.drtgPen || 0) },
+  { key: 'startersNetrtg', label: 'Starting Five NetRtg',
+    get: t => t.starters.netrtg },
+  { key: 'finalNetrtg', label: 'Final NetRtg',
+    get: t => t.netrtg },
+  { key: 'wins', label: 'Proj. Wins',
+    get: t => t.record.wins },
+];
+
+let rankingsSortKey = 'finalNetrtg';
+
+function renderRankingsPanel() {
+  const panel = document.getElementById('rankingsPanel');
+  const valid = TEAM_RESULTS.filter(t => !t.error);
+
+  // Compute rank (1=best) for every team in every category up front,
+  // so the table can show both the raw value and where it stands.
+  const ranksByCategory = {};
+  for (const cat of RANKING_CATEGORIES) {
+    const withVals = valid.map(t => ({ abbr: t.abbr, val: cat.get(t) }));
+    // Cost-framed categories: smaller cost = better = rank 1.
+    // Everything else: larger value = better = rank 1.
+    withVals.sort((a, b) => cat.costFraming ? a.val - b.val : b.val - a.val);
+    const ranks = {};
+    withVals.forEach((w, i) => { ranks[w.abbr] = i + 1; });
+    ranksByCategory[cat.key] = ranks;
+  }
+
+  const sortCat = RANKING_CATEGORIES.find(c => c.key === rankingsSortKey);
+  const sorted = [...valid].sort((a, b) => {
+    const av = sortCat.get(a), bv = sortCat.get(b);
+    return sortCat.costFraming ? av - bv : bv - av;
+  });
+
+  const rankClass = r => r <= 5 ? 'good' : r >= 26 ? 'bad' : '';
+
+  panel.innerHTML = `
+    <div class="tune-panel-inner">
+      <div class="tune-panel-header">
+        <div>
+          <h3>Category Rankings</h3>
+          <p>Each team's projection broken into individual mechanisms, ranked 1-30 (1 = best) within each column. Click a header to sort by it.</p>
+        </div>
+      </div>
+      <div class="rankings-scroll">
+        <table class="rankings-table">
+          <thead><tr>
+            <th>Team</th>
+            ${RANKING_CATEGORIES.map(c => `<th data-key="${c.key}" class="${c.key===rankingsSortKey?'active':''}">${c.label}${c.key===rankingsSortKey?' ▾':''}</th>`).join('')}
+          </tr></thead>
+          <tbody>
+            ${sorted.map(t => `
+              <tr>
+                <td class="team-cell">${t.abbr}</td>
+                ${RANKING_CATEGORIES.map(c => {
+                  const val = c.get(t);
+                  const rank = ranksByCategory[c.key][t.abbr];
+                  const shown = Number.isInteger(val) ? val : val.toFixed(1);
+                  return `<td>${c.costFraming && val > 0 ? '-' : ''}${shown}<span class="rank-badge ${rankClass(rank)}">#${rank}</span></td>`;
+                }).join('')}
+              </tr>
+            `).join('')}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  `;
+
+  panel.querySelectorAll('th[data-key]').forEach(th => {
+    th.addEventListener('click', () => {
+      rankingsSortKey = th.dataset.key;
+      renderRankingsPanel();
+    });
+  });
+}
+
+document.getElementById('rankingsBtn').addEventListener('click', () => {
+  const panel = document.getElementById('rankingsPanel');
+  const isOpen = panel.style.display !== 'none';
+  if (isOpen) {
+    panel.style.display = 'none';
+    document.getElementById('rankingsBtn').classList.remove('active');
+  } else {
+    renderRankingsPanel(); // always rebuild -- data may have changed via Tune Model
+    panel.style.display = 'block';
+    document.getElementById('rankingsBtn').classList.add('active');
   }
 });
 
