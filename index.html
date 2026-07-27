@@ -2866,11 +2866,31 @@ const RANKING_CATEGORIES = [
   { key: 'stackingCost', label: 'Stacking Penalty', costFraming: true,
     get: t => ((t.starters.totalOffRaw + t.starters.totalDefRaw) - (t.starters.totalOff + t.starters.totalDef)) + (t.teamStackingPenalty || 0) },
   { key: 'lineupFit', label: 'Lineup Fit',
-    get: t => t.starters.ortgAdj - t.starters.drtgAdj },
+    get: t => (t.starters.ortgAdj - t.starters.drtgAdj) + (t.starters.tsBonus || 0) },
   { key: 'uncertaintyCost', label: 'Uncertainty Discount', costFraming: true,
     get: t => t.starters.rookieDiscount || 0 },
   { key: 'structuralCost', label: 'Structural Penalty', costFraming: true,
     get: t => (t.starters.viability.ortgPen || 0) + (t.starters.viability.drtgPen || 0) },
+  { key: 'shrinkRecenter', label: 'Shrink + Recenter',
+    // The residual between raw talent (adjusted for every mechanism
+    // above) and the actual Starting Five NetRtg. Without this as its
+    // own column, the other columns don't add up to the final number --
+    // confirmed directly against a real case (HOU), where the shown
+    // columns left a ~5.9 point gap unaccounted for. This captures both
+    // the winner's-curse shrinkage (toward that team's own combo-pool
+    // mean) and the league-wide recentering shift (the same for every
+    // team, needed to keep the league average at 41-41) combined, since
+    // splitting them into two separate columns would require preserving
+    // an extra intermediate snapshot this build doesn't currently keep.
+    get: t => {
+      const adjustedRaw = t.starters.totalOffRaw + t.starters.totalDefRaw
+        - ((t.starters.totalOffRaw + t.starters.totalDefRaw) - (t.starters.totalOff + t.starters.totalDef)) - (t.teamStackingPenalty || 0)
+        + (t.starters.ortgAdj - t.starters.drtgAdj)
+        - (t.starters.rookieDiscount || 0)
+        - ((t.starters.viability.ortgPen || 0) + (t.starters.viability.drtgPen || 0))
+        + (t.starters.tsBonus || 0);
+      return t.starters.netrtg - adjustedRaw;
+    } },
   { key: 'startersNetrtg', label: 'Starting Five NetRtg',
     get: t => t.starters.netrtg },
   { key: 'finalNetrtg', label: 'Final NetRtg',
