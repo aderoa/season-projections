@@ -68,6 +68,11 @@ select { background:var(--surface); border:1px solid var(--border); border-radiu
 .tune-row input[type=range] { flex:1; accent-color:var(--accent); cursor:pointer; }
 .tune-row .tune-value { font-family:'JetBrains Mono',monospace; font-size:0.75rem; color:var(--accent); min-width:2.6em; text-align:right; }
 .tune-status { font-size:0.7rem; color:var(--text-muted); margin-top:0.8rem; min-height:1em; }
+.rawtalent-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(110px,1fr)); gap:0.4rem; }
+.rawtalent-item { display:flex; align-items:center; gap:0.4rem; padding:0.35rem 0.5rem; background:var(--surface2); border-radius:6px; font-family:'JetBrains Mono',monospace; font-size:0.72rem; }
+.rawtalent-item .rt-rank { color:var(--text-muted); font-size:0.62rem; }
+.rawtalent-item .rt-abbr { font-weight:700; font-family:inherit; }
+.rawtalent-item .rt-val { margin-left:auto; color:var(--accent); }
 .rankings-scroll { overflow-x:auto; }
 .rankings-table { width:100%; border-collapse:collapse; font-size:0.78rem; white-space:nowrap; }
 .rankings-table th { text-align:left; padding:0.5rem 0.7rem; font-family:'JetBrains Mono',monospace; font-size:0.62rem; text-transform:uppercase; letter-spacing:0.04em; color:var(--text-muted); border-bottom:1px solid var(--border); cursor:pointer; user-select:none; }
@@ -2829,8 +2834,11 @@ function renderTunePanel() {
         `).join('')}
       </div>
       <div class="tune-status" id="tuneStatus"></div>
+      <div class="tune-rawtalent" id="tuneRawTalent"></div>
     </div>
   `;
+
+  renderRawTalentLeaderboard();
 
   let debounceTimer = null;
   const triggerRecompute = () => {
@@ -2841,6 +2849,7 @@ function renderTunePanel() {
       if (runProjections) {
         await runProjections();
         statusEl.textContent = 'Updated just now.';
+        renderRawTalentLeaderboard();
       }
     }, 400);
   };
@@ -2862,6 +2871,28 @@ function renderTunePanel() {
     triggerRecompute();
   });
 }
+
+// Raw Talent: the unadjusted sum of the starting five's individual
+// off+def contributions (same definition as the Category Rankings
+// table's "Raw Talent" column) -- shown live here so the direct effect
+// of each slider is visible without switching panels. Reuses
+// RANKING_CATEGORIES' own rawTalent getter rather than duplicating the
+// calculation, so the two views can never silently drift apart.
+function renderRawTalentLeaderboard() {
+  const el = document.getElementById('tuneRawTalent');
+  if (!el) return;
+  const valid = TEAM_RESULTS.filter(t => !t.error);
+  if (!valid.length) { el.innerHTML = ''; return; }
+  const rawTalentCat = RANKING_CATEGORIES.find(c => c.key === 'rawTalent');
+  const sorted = [...valid].sort((a, b) => rawTalentCat.get(b) - rawTalentCat.get(a));
+  el.innerHTML = `
+    <div class="section-label" style="margin:1rem 0 0.5rem;">Raw Talent (live, all 30 teams)</div>
+    <div class="rawtalent-grid">
+      ${sorted.map((t, i) => `<div class="rawtalent-item"><span class="rt-rank">#${i+1}</span><span class="rt-abbr">${t.abbr}</span><span class="rt-val">${rawTalentCat.get(t).toFixed(1)}</span></div>`).join('')}
+    </div>
+  `;
+}
+
 
 document.getElementById('tuneBtn').addEventListener('click', () => {
   const panel = document.getElementById('tunePanel');
