@@ -288,6 +288,30 @@ const ROOKIE_DISCOUNT_MIN = 0.5;  // applied even to a #1 overall pick -- fixed 
 // considered genuinely established.
 const CAREER_GAMES_ESTABLISHED = 250;   // total career GP at which this discount reaches zero
 
+// SEASONS_ESTABLISHED: an independent path to "established" status via
+// distinct qualifying seasons, not just total games. Confirmed directly
+// as necessary: Joel Embiid (230 career games, just under
+// CAREER_GAMES_ESTABLISHED=250) was getting a real, systematic discount
+// in every single Philadelphia combo he appeared in -- but his low game
+// total is from injuries, not from being unproven. He has 5 real
+// seasons of consistently elite, well-documented play, which is about
+// as "known a quantity" as exists in the league. Total games alone
+// conflates "rarely played because unproven" with "rarely played
+// because of injuries despite being an established star" -- these are
+// different kinds of uncertainty, and only the first one should be
+// discounted. A player is now established (no discount) if EITHER
+// metric clears its bar.
+// 5, not 4: this database only covers 5 historical seasons (2021-22
+// through 2025-26), so 5 is effectively "played in every season this
+// data covers." Confirmed necessary directly: a threshold of 4 would
+// have also established Dominick Barlow (4 seasons, all as a fringe
+// rotation player) alongside Embiid (5 seasons) -- these are different
+// cases, and 5 is the threshold that actually separates them, since a
+// games-per-season quality bar can't cleanly do it either (Embiid's own
+// injury-shortened seasons include 38, 19, and 39 games, so a stricter
+// "substantial season" bar would still incorrectly penalize him).
+const SEASONS_ESTABLISHED = 5;
+
 function sampleUncertaintyDiscount(quality) {
   let total = 0;
   for (const q of quality) {
@@ -298,8 +322,11 @@ function sampleUncertaintyDiscount(quality) {
       total += ROOKIE_DISCOUNT_MIN + (SETTINGS.rookieDiscountMax - ROOKIE_DISCOUNT_MIN) * uncertaintyFactor;
     } else {
       const gp = q.totalCareerGP || 0;
-      if (gp >= CAREER_GAMES_ESTABLISHED) continue; // fully established -- no discount
-      const uncertaintyFactor = 1 - gp / CAREER_GAMES_ESTABLISHED;
+      const seasons = q.totalCareerSeasons || 0;
+      if (gp >= CAREER_GAMES_ESTABLISHED || seasons >= SEASONS_ESTABLISHED) continue; // established via either path -- no discount
+      const gamesFactor = 1 - gp / CAREER_GAMES_ESTABLISHED;
+      const seasonsFactor = 1 - seasons / SEASONS_ESTABLISHED;
+      const uncertaintyFactor = Math.min(gamesFactor, seasonsFactor);
       total += SETTINGS.sampleDiscountMax * uncertaintyFactor;
     }
   }
@@ -516,14 +543,14 @@ function computeWeightedRat365(hhName) {
     tw += rat*w; twt += w;
     if (r.SEASON === CURRENT_SEASON) curGP = r.GP;
   }
-  if (twt === 0) return currentRat365 !== null ? { effective: currentRat365, currentGP: 0, totalCareerGP: rows.reduce((s,r)=>s+r.GP,0) } : null;
+  if (twt === 0) return currentRat365 !== null ? { effective: currentRat365, currentGP: 0, totalCareerGP: rows.reduce((s,r)=>s+r.GP,0), totalCareerSeasons: rows.length } : null;
   const blended = tw/twt;
   let effective;
   if (currentRat365 === null) effective = blended;
   else if (blended > currentRat365) effective = currentRat365 + boostFraction(curGP)*(blended-currentRat365);
   else effective = currentRat365;
   const totalCareerGP = rows.reduce((s,r) => s + r.GP, 0);
-  return { effective, blended, currentRat365, currentGP: curGP, totalCareerGP };
+  return { effective, blended, currentRat365, currentGP: curGP, totalCareerGP, totalCareerSeasons: rows.length };
 }
 
 function boxScoreDefComposite(blk, stl, drebPct) { return COMP_BLK*(blk||0) + COMP_STL*(stl||0) + COMP_DREB*(drebPct||0); }
@@ -653,7 +680,8 @@ function _computeQuality(hhName) {
   }
   return { hh_name: hhName, rat365, age, ageMult: am, rawWatermark: rawRat365, isRookie: isRookieFlag,
     draftPos: isRookieFlag ? live.draftPos : null,
-    totalCareerGP: isRookieFlag ? 0 : (w.totalCareerGP || 0) };
+    totalCareerGP: isRookieFlag ? 0 : (w.totalCareerGP || 0),
+    totalCareerSeasons: isRookieFlag ? 0 : (w.totalCareerSeasons || 0) };
 }
 
 function getDefenseQuality(hhName) {
