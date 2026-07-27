@@ -607,6 +607,19 @@ function hhToNba(hhName) {
   return hhName;
 }
 
+// Strips diacritics and lowercases, for matching player names across the
+// rm-tv sheet's two independent blocks (roster vs historical), which may
+// not spell accented names consistently -- confirmed directly: Luka
+// Doncic (whose surname carries a haček -- Dončić) was returning zero
+// historical records and getting flagged as a rookie with a near-floor
+// rating, despite being a well-established superstar. NFD normalization
+// decomposes accented characters into base letter + combining accent
+// mark, then strips the combining marks, leaving plain ASCII on both
+// sides regardless of which spelling either block happens to use.
+function normalizeName(name) {
+  return (name || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().trim();
+}
+
 // Real watermark computation, ported directly from RealValue's own
 // logic (see globalratingplus reference) -- using real historical Total
 // RAT data from the rm-tv sheet's history blocks, not a PIE-based
@@ -645,11 +658,22 @@ function computeWeightedRat365(hhName) {
   const currentRat365 = live ? live.rat365 : null;
   const age = live ? ageFromBirthday(live.birthday) : null;
 
-  const hist = HISTORICAL_RAT_BY_PLAYER[nbaName.toLowerCase()] || [];
+  const hist = HISTORICAL_RAT_BY_PLAYER[normalizeName(nbaName)] || [];
   // TRUE rookies (zero historical record, ever) must return null here --
   // a live rat365 of 0 for someone who hasn't played isn't a real signal
   // (see the isRookieFlag logic downstream, which depends on this).
-  if (!hist.length) return null;
+  // A player with substantial LIVE production but zero historical
+  // records is a red flag for a remaining name-matching gap (this is
+  // exactly the pattern that caught Luka Doncic before the diacritics
+  // fix -- an established player silently falling through to the rookie
+  // path), so this is flagged loudly rather than silently misclassifying
+  // someone as a rookie again.
+  if (!hist.length) {
+    if (currentRat365 !== null && currentRat365 > 5) {
+      console.warn(`[Watermark] ${hhName} (NBA name: ${nbaName}) has live rat365=${currentRat365} but zero historical records -- likely a name-matching gap, not a true rookie. Check for spelling/diacritics differences between the roster and historical blocks.`);
+    }
+    return null;
+  }
 
   const curYear = seasonStartYear(CURRENT_SEASON);
   let num = 0, den = 0, priorNum = 0, priorDen = 0, curGP = 0;
@@ -2657,11 +2681,33 @@ async function boot() {
 
     const parsed = parseRmTv(rmTvText);
     LIVE_RATINGS = parsed.roster;
+
+    // Build alias groups from the curated name_dictionary.json (NAME_DICT)
+    // rather than relying on diacritics-stripping alone -- confirmed this
+    // project already has the exact fix needed for cases like this (e.g.
+    // 'Luka Dončić' -> 'Luka Doncic'), and it also covers mismatches that
+    // aren't just accent marks (e.g. 'Marvin Bagley III' -> 'Marvin
+    // Bagley', a suffix difference normalizeName() alone wouldn't catch).
+    // Each historical record gets stored under every known alias for that
+    // identity, so a lookup succeeds regardless of which spelling variant
+    // either side of the pipeline happens to use.
+    const nameAliasGroups = {}; // normalized name -> array of all normalized aliases sharing that identity
+    for (const [nbaN, hhN] of Object.entries(NAME_DICT)) {
+      const a = normalizeName(nbaN), b = normalizeName(hhN);
+      if (a === b) continue; // no alias needed when both sides already match
+      const existing = nameAliasGroups[a] || nameAliasGroups[b] || [];
+      const group = [...new Set([...existing, a, b])];
+      for (const alias of group) nameAliasGroups[alias] = group;
+    }
+
     HISTORICAL_RAT_BY_PLAYER = {};
     for (const h of parsed.historical) {
-      const k = h.player.toLowerCase();
-      if (!HISTORICAL_RAT_BY_PLAYER[k]) HISTORICAL_RAT_BY_PLAYER[k] = [];
-      HISTORICAL_RAT_BY_PLAYER[k].push(h);
+      const k = normalizeName(h.player);
+      const aliases = nameAliasGroups[k] || [k];
+      for (const alias of aliases) {
+        if (!HISTORICAL_RAT_BY_PLAYER[alias]) HISTORICAL_RAT_BY_PLAYER[alias] = [];
+        HISTORICAL_RAT_BY_PLAYER[alias].push(h);
+      }
     }
 
     const ages = Object.values(LIVE_RATINGS).map(p => ageFromBirthday(p.birthday)).filter(a => a !== null);
