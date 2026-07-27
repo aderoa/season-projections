@@ -2433,6 +2433,19 @@ function generateAndRankCombos(units) {
   const allDrtg = combos.map(c => c.result.drtg);
   const comboMeanDrtg = allDrtg.reduce((a,b)=>a+b,0) / allDrtg.length;
 
+  if (units[0].names.includes('Jalen Brunson')) {
+    const withDiscount = combos.filter(c => (c.result.rookieDiscount||0) > 0);
+    const avgDiscount = withDiscount.length ? withDiscount.reduce((s,c)=>s+c.result.rookieDiscount,0)/withDiscount.length : 0;
+    const avgStackFactor = combos.reduce((s,c)=>s+(c.result.stackingFactor||1),0)/combos.length;
+    console.log('[POOL DEBUG] NYK combo pool: n=', combos.length,
+      '| comboMeanNetrtg:', comboMeanNetrtg.toFixed(2),
+      '| combos with sample-discount>0:', withDiscount.length, '/ 243, avg discount:', avgDiscount.toFixed(2),
+      '| avg stackingFactor across pool:', avgStackFactor.toFixed(3));
+    const netrtgsSorted = [...allNetrtg].sort((a,b)=>a-b);
+    console.log('[POOL DEBUG] netrtg range: min=', netrtgsSorted[0].toFixed(1), 'max=', netrtgsSorted[netrtgsSorted.length-1].toFixed(1),
+      'median=', netrtgsSorted[Math.floor(netrtgsSorted.length/2)].toFixed(1));
+  }
+
   for (const combo of selected) {
     const r = combo.result;
     const shrunkOrtg = comboMeanOrtg + SHRINKAGE_RETENTION * (r.ortg - comboMeanOrtg);
