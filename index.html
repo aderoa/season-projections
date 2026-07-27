@@ -214,7 +214,6 @@ const USG_HIGH = 0.25, SHOOT_OK = 0.35, SHOOT_MIN_3PA = 2.0;
 const AST_HIGH = 0.20, REB_HIGH = 0.10, BLK_HIGH = 1.0;
 const OFF_CALIB = 12, OFF_SCALE = 0.25;
 const DEF_CALIB = 10, DEF_SCALE = 0.18;
-const DEF_TO_RAT_FACTOR = 0.5;
 const LEAGUE_BASE = 115;
 
 // User-adjustable model parameters, exposed via the Tune Model panel.
@@ -230,6 +229,15 @@ const DEFAULT_SETTINGS = {
   // selection bias in the single top-ranked combo). Still adjustable
   // via the Search Confidence slider if some correction is wanted back.
   shrinkageRetention: 1.0,
+  // How much of a player's defensive value gets subtracted from rat365
+  // before computing their offensive contribution. Confirmed directly:
+  // at the original 0.5, elite-defense rosters (OKC) saw rat365's
+  // isolated contribution go NEGATIVE, since so much of it got
+  // attributed to defense and stripped out -- DEF_SCORE (a fully
+  // separate live metric) ended up doing nearly all the work, with
+  // rat365/watermark barely mattering. Lower = more of rat365 comes
+  // through unmodified = watermark more dominant relative to DEF_SCORE.
+  defToRatFactor: 0.5,
   teamStackingRate: 1.75,
   homeAdvantage: 3.0,
   rookieDiscountMax: 3.5,
@@ -866,7 +874,7 @@ function projectLineup(names, positions) {
     const defScore = d ? d.def_score : null;
     const defContrib = defScore !== null ? (defScore - DEF_CALIB) * DEF_SCALE : 0;
     const defAboveAvg = (defScore !== null ? defScore : DEF_CALIB) - DEF_CALIB;
-    const offRat = q.rat365 - defAboveAvg * DEF_TO_RAT_FACTOR;
+    const offRat = q.rat365 - defAboveAvg * SETTINGS.defToRatFactor;
     const offContrib = (offRat - OFF_CALIB) * OFF_SCALE;
     quality.push({...q, def_score: defScore, def_contrib: defContrib, off_contrib: offContrib});
   }
@@ -2783,6 +2791,8 @@ const TUNE_SCHEMA = [
     desc: 'Largest discount applied to a combo including a true rookie -- scaled down for higher draft picks, this is the ceiling for the latest picks.' },
   { key: 'sampleDiscountMax', label: 'Thin-Sample Uncertainty (max)', min: 0, max: 6, step: 0.5,
     desc: 'Largest discount applied to a combo including a non-rookie with under ~250 career games -- tapers to zero as career games increase.' },
+  { key: 'defToRatFactor', label: 'Defense Offset (lower = rat365 more dominant)', min: 0, max: 1, step: 0.05,
+    desc: 'How much of a player\'s defensive value gets subtracted from rat365 before computing offense. At the default, elite-defense rosters can see rat365\'s contribution go negative, with DEF_SCORE (a separate live metric) doing nearly all the work. Lower this to make the watermark/rat365 rating matter more relative to DEF_SCORE.' },
 ];
 
 function renderTunePanel() {
