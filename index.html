@@ -817,6 +817,10 @@ function projectLineup(names, positions) {
   const stackingFactor = Math.max(0.6, 1 - STACKING_DIMINISH_RATE * Math.max(0, strongCount - 2));
   const totalOff = totalOffRaw * stackingFactor;
   const totalDef = totalDefRaw * stackingFactor;
+  if (names.includes('Jalen Brunson')) {
+    console.log('[STACK DEBUG]', names.join(','), '| strongCount:', strongCount, '| stackingFactor:', stackingFactor,
+      '| totalOffRaw+totalDefRaw:', (totalOffRaw+totalDefRaw).toFixed(2), '-> totalOff+totalDef:', (totalOff+totalDef).toFixed(2));
+  }
 
   const stats = [];
   for (let i = 0; i < names.length; i++) {
@@ -2486,10 +2490,17 @@ for (const abbr of teams) {
   if (comboMeans) {
     const shrunkOrtg = comboMeans.comboMeanOrtg + SHRINKAGE_RETENTION * (startResult.ortg - comboMeans.comboMeanOrtg);
     const shrunkDrtg = comboMeans.comboMeanDrtg + SHRINKAGE_RETENTION * (startResult.drtg - comboMeans.comboMeanDrtg);
+    if (abbr === 'NYK') {
+      console.log('[SHRINK DEBUG] NYK starters raw netrtg:', startResult.netrtg,
+        '| comboMeanOrtg:', comboMeans.comboMeanOrtg.toFixed(2), '| comboMeanDrtg:', comboMeans.comboMeanDrtg.toFixed(2),
+        '| shrunk netrtg will be:', Math.round((shrunkOrtg-shrunkDrtg)*10)/10);
+    }
     startResult.rawOrtg = startResult.ortg; startResult.rawDrtg = startResult.drtg; startResult.rawNetrtg = startResult.netrtg;
     startResult.ortg = Math.round(shrunkOrtg*10)/10;
     startResult.drtg = Math.round(shrunkDrtg*10)/10;
     startResult.netrtg = Math.round((shrunkOrtg-shrunkDrtg)*10)/10;
+  } else if (abbr === 'NYK') {
+    console.log('[SHRINK DEBUG] NYK: comboMeans is null/falsy -- shrinkage skipped entirely');
   }
 
   const nUsed = top20 ? Math.min(20, top20.length) : 0;
