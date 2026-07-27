@@ -2546,6 +2546,8 @@ for (const abbr of teams) {
 {
   const valid = TEAM_RESULTS.filter(t => !t.error);
   const shift = valid.reduce((s,t) => s + t.netrtg, 0) / valid.length;
+  const nykBefore = valid.find(t => t.abbr === 'NYK');
+  console.log('[RECENTER DEBUG] league-wide shift:', shift.toFixed(3), '| NYK netrtg BEFORE recentering:', nykBefore ? nykBefore.netrtg : 'not found');
   const recenter = (obj) => {
     obj.ortg = Math.round((obj.ortg - shift/2) * 10) / 10;
     obj.drtg = Math.round((obj.drtg + shift/2) * 10) / 10;
@@ -2556,6 +2558,8 @@ for (const abbr of teams) {
     recenter(t.starters);
     if (t.top10) for (const combo of t.top10) recenter(combo.result);
   }
+  const nykAfter = valid.find(t => t.abbr === 'NYK');
+  console.log('[RECENTER DEBUG] NYK netrtg AFTER recentering:', nykAfter ? nykAfter.netrtg : 'not found');
   const teamNetrtgMap = {};
   for (const t of valid) teamNetrtgMap[t.abbr] = t.netrtg;
   const seasonRecords = simulateSeasonRecords(teamNetrtgMap);
