@@ -243,14 +243,32 @@ const MAX_ROOKIE_RATING = 14.0;    // calibrated against Cooper Flagg's real rat
 const ROOKIE_DISCOUNT_MIN = 0.5;  // applied even to a #1 overall pick
 const ROOKIE_DISCOUNT_MAX = 3.5;  // applied to the latest picks (~#60)
 
-function rookieUncertaintyDiscount(quality) {
+// Extended beyond true rookies: a player with a thin CAREER sample (e.g.
+// 40 total games, all in one season) carries real uncertainty even
+// though they technically aren't a rookie -- confirmed directly with
+// Brooks Barnhizer, whose entire NBA history is 40 games in a single
+// season, and who got zero discount under the rookie-only version since
+// isRookie only checks "zero seasons ever," not "how established is
+// this player really." Scales the same way: thinner sample = larger
+// discount, tapering to zero once a player has enough total games to be
+// considered genuinely established.
+const SAMPLE_DISCOUNT_MAX = 3.0;        // for the thinnest non-rookie samples
+const CAREER_GAMES_ESTABLISHED = 250;   // total career GP at which this discount reaches zero
+
+function sampleUncertaintyDiscount(quality) {
   let total = 0;
   for (const q of quality) {
-    if (!q.isRookie) continue;
-    const dp = q.draftPos && q.draftPos >= 1 && q.draftPos <= 60 ? q.draftPos : 60;
-    const draftFactor = Math.exp(-ROOKIE_DRAFT_DECAY * (dp - 1));
-    const uncertaintyFactor = 1 - draftFactor; // 0 at pick 1, ->1 at pick 60
-    total += ROOKIE_DISCOUNT_MIN + (ROOKIE_DISCOUNT_MAX - ROOKIE_DISCOUNT_MIN) * uncertaintyFactor;
+    if (q.isRookie) {
+      const dp = q.draftPos && q.draftPos >= 1 && q.draftPos <= 60 ? q.draftPos : 60;
+      const draftFactor = Math.exp(-ROOKIE_DRAFT_DECAY * (dp - 1));
+      const uncertaintyFactor = 1 - draftFactor; // 0 at pick 1, ->1 at pick 60
+      total += ROOKIE_DISCOUNT_MIN + (ROOKIE_DISCOUNT_MAX - ROOKIE_DISCOUNT_MIN) * uncertaintyFactor;
+    } else {
+      const gp = q.totalCareerGP || 0;
+      if (gp >= CAREER_GAMES_ESTABLISHED) continue; // fully established -- no discount
+      const uncertaintyFactor = 1 - gp / CAREER_GAMES_ESTABLISHED;
+      total += SAMPLE_DISCOUNT_MAX * uncertaintyFactor;
+    }
   }
   return total;
 }
@@ -465,13 +483,14 @@ function computeWeightedRat365(hhName) {
     tw += rat*w; twt += w;
     if (r.SEASON === CURRENT_SEASON) curGP = r.GP;
   }
-  if (twt === 0) return currentRat365 !== null ? { effective: currentRat365, currentGP: 0 } : null;
+  if (twt === 0) return currentRat365 !== null ? { effective: currentRat365, currentGP: 0, totalCareerGP: rows.reduce((s,r)=>s+r.GP,0) } : null;
   const blended = tw/twt;
   let effective;
   if (currentRat365 === null) effective = blended;
   else if (blended > currentRat365) effective = currentRat365 + boostFraction(curGP)*(blended-currentRat365);
   else effective = currentRat365;
-  return { effective, blended, currentRat365, currentGP: curGP };
+  const totalCareerGP = rows.reduce((s,r) => s + r.GP, 0);
+  return { effective, blended, currentRat365, currentGP: curGP, totalCareerGP };
 }
 
 function boxScoreDefComposite(blk, stl, drebPct) { return COMP_BLK*(blk||0) + COMP_STL*(stl||0) + COMP_DREB*(drebPct||0); }
@@ -600,7 +619,8 @@ function _computeQuality(hhName) {
     rat365 = rawRat365 * am;
   }
   return { hh_name: hhName, rat365, age, ageMult: am, rawWatermark: rawRat365, isRookie: isRookieFlag,
-    draftPos: isRookieFlag ? live.draftPos : null };
+    draftPos: isRookieFlag ? live.draftPos : null,
+    totalCareerGP: isRookieFlag ? 0 : (w.totalCareerGP || 0) };
 }
 
 function getDefenseQuality(hhName) {
@@ -829,7 +849,7 @@ function projectLineup(names, positions) {
   // ranking -- confirmed necessary directly: profile-blending alone
   // didn't change an outcome where a rookie's low-usage projection
   // matched the league-wide average anyway.
-  const rookieDiscount = rookieUncertaintyDiscount(quality);
+  const rookieDiscount = sampleUncertaintyDiscount(quality);
   if (rookieDiscount > 0) {
     ortg -= rookieDiscount / 2;
     drtg += rookieDiscount / 2;
@@ -1277,7 +1297,7 @@ function openDetail(abbr) {
         return `<span style="${unitStyle[which] || ''}">${n}</span>`;
       }).join(' · ');
       const discNote = combo.result.rookieDiscount > 0
-        ? ` <span style="color:var(--orange);font-size:0.65rem;">(−${combo.result.rookieDiscount.toFixed(1)} rookie discount)</span>` : '';
+        ? ` <span style="color:var(--orange);font-size:0.65rem;">(−${combo.result.rookieDiscount.toFixed(1)} sample-size discount)</span>` : '';
       return `<div class="player-row" style="grid-template-columns:2rem 1fr auto;">
         <div class="pos">#${i+1}</div>
         <div class="pname" style="font-weight:400;">${nameSpans}${discNote}</div>
@@ -1310,7 +1330,7 @@ function openDetail(abbr) {
     <div class="section-label">Model Detail</div>
     <div class="note-list">
       <div>Weights come from the real, empirically-measured share of team possessions by lineup usage rank (lineups.db, 2025-26) -- not an assumed split.</div>
-      <div>Rookie-inclusive combos carry a direct uncertainty discount scaled by draft position (−0.5 for a #1 pick up to −3.5 for late picks), shown inline where it applies.</div>
+      <div>Uncertainty discount applies to any thin sample: true rookies scaled by draft position (−0.5 for a #1 pick up to −3.5 for late picks), and any player with under ~250 career games scaled by how thin that sample is -- shown inline where it applies.</div>
       <div>Defense source: ${Object.keys(DEFENSE).length ? 'live DEF_SCORE where available' : 'box-score approximation (defense-cache empty)'}</div>
     </div>
   `;
