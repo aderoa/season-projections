@@ -2571,6 +2571,11 @@ for (const abbr of teams) {
   const shift = valid.reduce((s,t) => s + t.netrtg, 0) / valid.length;
   const nykBefore = valid.find(t => t.abbr === 'NYK');
   console.log('[RECENTER DEBUG] league-wide shift:', shift.toFixed(3), '| NYK netrtg BEFORE recentering:', nykBefore ? nykBefore.netrtg : 'not found');
+  const sorted = [...valid].sort((a,b) => a.netrtg - b.netrtg);
+  console.log('[LEAGUE DEBUG] all 30 teams pre-recentering netrtg, sorted:',
+    sorted.map(t => `${t.abbr}:${t.netrtg}`).join(' | '));
+  const errored = TEAM_RESULTS.filter(t => t.error);
+  console.log('[LEAGUE DEBUG] teams with errors (excluded from average):', errored.length, errored.map(t=>`${t.abbr}(${t.error})`));
   const recenter = (obj) => {
     obj.ortg = Math.round((obj.ortg - shift/2) * 10) / 10;
     obj.drtg = Math.round((obj.drtg + shift/2) * 10) / 10;
