@@ -223,7 +223,13 @@ const LEAGUE_BASE = 115;
 // trigger a live recompute on change.
 const DEFAULT_SETTINGS = {
   fitWeight: 0.35,
-  shrinkageRetention: 0.5,
+  // Set to 1.0 (no shrinkage) per direct request after the category
+  // rankings revealed this mechanism swinging team-to-team by as much
+  // as ~11 points (Knicks +11.3 vs OKC +0.1) based purely on combo-pool
+  // depth -- disproportionate to what it was built to correct (search-
+  // selection bias in the single top-ranked combo). Still adjustable
+  // via the Search Confidence slider if some correction is wanted back.
+  shrinkageRetention: 1.0,
   teamStackingRate: 1.75,
   homeAdvantage: 3.0,
   rookieDiscountMax: 3.5,
