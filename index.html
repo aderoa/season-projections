@@ -89,8 +89,30 @@ select { background:var(--surface); border:1px solid var(--border); border-radiu
 /* === PAGE-SPECIFIC: projection grid & detail view === */
 .container { max-width:1400px; margin:1.5rem auto 3rem; padding:0 2rem; }
 
-.rank-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(310px,1fr)); gap:0.85rem; margin-top:1.25rem; }
-.team-card { background:var(--surface); border:1px solid var(--border); border-radius:12px; padding:1.1rem 1.2rem; cursor:pointer; transition:border-color 0.15s, transform 0.1s, box-shadow 0.15s; position:relative; }
+.standings-wrap { margin-top:1.25rem; }
+.standings-legend { display:flex; flex-wrap:wrap; gap:1.2rem; align-items:center; margin-bottom:1.2rem; font-size:0.75rem; color:var(--text-muted); }
+.legend-item { display:flex; align-items:center; gap:0.4rem; }
+.legend-swatch { width:0.7rem; height:0.7rem; border-radius:3px; display:inline-block; }
+.legend-swatch.locked { background:#15803d; }
+.legend-swatch.playin { background:#d97706; }
+.legend-swatch.out { background:var(--border); }
+.legend-item.sim-note { margin-left:auto; font-style:italic; }
+.standings-columns { display:grid; grid-template-columns:1fr 1fr; gap:1.5rem; }
+@media(max-width:900px) { .standings-columns { grid-template-columns:1fr; } }
+.conf-table-wrap h3 { font-size:0.95rem; margin:0 0 0.6rem; }
+.standings-table { width:100%; border-collapse:collapse; font-size:0.82rem; }
+.standings-table th { text-align:left; padding:0.45rem 0.6rem; font-family:'JetBrains Mono',monospace; font-size:0.6rem; text-transform:uppercase; letter-spacing:0.04em; color:var(--text-muted); border-bottom:1px solid var(--border); }
+.standings-table td { padding:0.5rem 0.6rem; border-bottom:1px solid var(--border); font-family:'JetBrains Mono',monospace; }
+.standings-table td.team-cell { font-family:inherit; font-weight:700; }
+.standings-table td.seed-cell { color:var(--text-muted); font-weight:600; }
+.standings-row { cursor:pointer; transition:background 0.1s; }
+.standings-row:hover td { background:var(--accent-dim); }
+.standings-row.zone-locked td.seed-cell { color:#15803d; }
+.standings-row.zone-playin td.seed-cell { color:#d97706; }
+.standings-row.zone-out { opacity:0.55; }
+.standings-row.zone-locked { border-left:3px solid #15803d; }
+.standings-row.zone-playin { border-left:3px solid #d97706; }
+.standings-row.zone-out { border-left:3px solid var(--border); }
 .team-card:hover { border-color:var(--accent); transform:translateY(-1px); box-shadow:0 4px 14px rgba(0,0,0,0.06); }
 .team-card .rank { position:absolute; top:1rem; right:1.1rem; font-family:'JetBrains Mono',monospace; font-size:0.7rem; color:var(--text-muted); font-weight:600; }
 .team-card .team-name { font-weight:700; font-size:1.05rem; letter-spacing:-0.01em; margin-bottom:0.15rem; }
@@ -152,19 +174,6 @@ select { background:var(--surface); border:1px solid var(--border); border-radiu
 </div>
 
 <div class="controls" id="controls" style="display:none;">
-  <div class="search-box">
-    <span class="icon">🔍</span>
-    <input type="text" id="searchInput" placeholder="Search team or player...">
-  </div>
-  <div class="filter-group">
-    <label>Sort</label>
-    <select id="sortSelect">
-      <option value="net">Projected Record</option>
-      <option value="ortg">Projected ORtg</option>
-      <option value="drtg">Projected DRtg</option>
-      <option value="az">Team A–Z</option>
-    </select>
-  </div>
   <button class="ctrl-btn" id="refreshBtn">↻ Refresh</button>
   <button class="ctrl-btn" id="tuneBtn">⚙ Tune Model</button>
   <button class="ctrl-btn" id="rankingsBtn">📊 Category Rankings</button>
@@ -179,7 +188,7 @@ select { background:var(--surface); border:1px solid var(--border); border-radiu
     <p id="loadingStatus">Loading live data...</p>
   </div>
   <div id="errorBox" style="display:none;"></div>
-  <div class="rank-grid" id="rankGrid"></div>
+  <div class="standings-wrap" id="standingsWrap"></div>
 </div>
 
 <div class="footer">
@@ -252,7 +261,7 @@ const DEFAULT_SETTINGS = {
   // even terms) so it acts as a real but secondary modulation.
   defScale: 0.07,
   structuralPenaltyWeight: 1.0,
-  teamStackingRate: 1.75,
+  teamStackingRate: 0.5,
   homeAdvantage: 3.0,
   rookieDiscountMax: 3.5,
   sampleDiscountMax: 3.0,
@@ -2292,6 +2301,117 @@ function winProbability(homeNetrtg, awayNetrtg) {
   return normalCDF(expectedMargin / GAME_MARGIN_SD);
 }
 
+// Real NBA conference structure -- static, well-known fact, not the
+// actual 2026-27 assignments if realignment happens, but the closest
+// available proxy. Only conference is needed here (not full divisions),
+// since this feeds standings/playoff seeding, not schedule generation.
+const EASTERN_TEAMS = ['ATL','BOS','BKN','CHA','CHI','CLE','DET','IND','MIA','MIL','NYK','ORL','PHI','TOR','WAS'];
+function teamConference(abbr) { return EASTERN_TEAMS.includes(abbr) ? 'East' : 'West'; }
+
+// =====================================================
+// PLAYOFF SIMULATION -- play-in tournament + full bracket, via Monte
+// Carlo (simulating the whole postseason many times is far simpler and
+// less error-prone than exact combinatorics for a multi-round bracket
+// with a play-in round feeding into it, and JS can run several thousand
+// iterations fast enough for this to feel live).
+// =====================================================
+
+// Exact probability of team A winning a best-of-7 series against team B,
+// given a real 2-2-1-1-1 home-court format (higher seed hosts games
+// 1,2,5,7; lower seed hosts games 3,4,6) -- via a small recursive DP,
+// not simulation, since a 7-game series has few enough states to solve
+// directly and exactly.
+function seriesWinProbability(aNetrtg, bNetrtg, aIsHigherSeed) {
+  const aHostsGame = [true, true, false, false, true, false, true]; // games 1-7, from A's (higher seed's) perspective
+  const cache = {};
+  function rec(g, aWins, bWins) {
+    if (aWins === 4) return 1;
+    if (bWins === 4) return 0;
+    const key = `${g}_${aWins}_${bWins}`;
+    if (key in cache) return cache[key];
+    const aHome = aIsHigherSeed ? aHostsGame[g] : !aHostsGame[g];
+    const pAWins = aHome ? winProbability(aNetrtg, bNetrtg) : 1 - winProbability(bNetrtg, aNetrtg);
+    const result = pAWins * rec(g+1, aWins+1, bWins) + (1-pAWins) * rec(g+1, aWins, bWins+1);
+    cache[key] = result;
+    return result;
+  }
+  return rec(0, 0, 0);
+}
+
+// Simulates one full postseason (play-in + bracket) for one conference,
+// given its 8 seeds are still undetermined (seeds 1-6 locked in from
+// regular-season finish, 7-10 competing in the play-in). Returns the
+// eventual conference champion.
+function simulateConferencePlayoffs(standings) {
+  // standings: array of 10 teams (abbr + netrtg), sorted by seed 1-10.
+  const netrtg = {}; for (const t of standings) netrtg[t.abbr] = t.netrtg;
+  const seed = i => standings[i-1].abbr;
+
+  // Play-in: game 1 (7v8), game 2 (9v10), game 3 (loser of 1 vs winner of 2)
+  const g1Winner = Math.random() < winProbability(netrtg[seed(7)], netrtg[seed(8)]) ? seed(7) : seed(8);
+  const g1Loser = g1Winner === seed(7) ? seed(8) : seed(7);
+  const g2Winner = Math.random() < winProbability(netrtg[seed(9)], netrtg[seed(10)]) ? seed(9) : seed(10);
+  const g3Winner = Math.random() < winProbability(netrtg[g1Loser], netrtg[g2Winner]) ? g1Loser : g2Winner;
+
+  const finalSeeds = [seed(1), seed(2), seed(3), seed(4), seed(5), seed(6), g1Winner, g3Winner]; // 1-8
+
+  // Standard fixed bracket (no re-seeding): 1v8, 4v5, 3v6, 2v7
+  function playSeries(aIdx, bIdx, aIsHigher) {
+    const a = finalSeeds[aIdx], b = finalSeeds[bIdx];
+    const p = seriesWinProbability(netrtg[a], netrtg[b], aIsHigher);
+    return Math.random() < p ? a : b;
+  }
+  const r1 = [
+    playSeries(0, 7, true),  // 1 v 8
+    playSeries(3, 4, true),  // 4 v 5
+    playSeries(2, 5, true),  // 3 v 6
+    playSeries(1, 6, true),  // 2 v 7
+  ];
+  // Conference semis: winner(1v8) v winner(4v5); winner(3v6) v winner(2v7)
+  const r2 = [
+    Math.random() < seriesWinProbability(netrtg[r1[0]], netrtg[r1[1]], true) ? r1[0] : r1[1],
+    Math.random() < seriesWinProbability(netrtg[r1[2]], netrtg[r1[3]], true) ? r1[2] : r1[3],
+  ];
+  // Conference finals
+  const champ = Math.random() < seriesWinProbability(netrtg[r2[0]], netrtg[r2[1]], true) ? r2[0] : r2[1];
+  return { finalSeeds, r1, r2, champ };
+}
+
+function runPlayoffSimulation(teamResults, iterations = 3000) {
+  const valid = teamResults.filter(t => !t.error);
+  const east = valid.filter(t => teamConference(t.abbr) === 'East').sort((a,b) => b.netrtg - a.netrtg);
+  const west = valid.filter(t => teamConference(t.abbr) === 'West').sort((a,b) => b.netrtg - a.netrtg);
+  const netrtgOf = {}; for (const t of valid) netrtgOf[t.abbr] = t.netrtg;
+
+  const stats = {};
+  for (const t of valid) stats[t.abbr] = { madePlayoffs: 0, madeConfSemis: 0, madeConfFinals: 0, madeFinals: 0, wonTitle: 0 };
+
+  for (let i = 0; i < iterations; i++) {
+    const eastResult = simulateConferencePlayoffs(east);
+    const westResult = simulateConferencePlayoffs(west);
+
+    for (const result of [eastResult, westResult]) {
+      for (const a of result.finalSeeds) stats[a].madePlayoffs++;
+      for (const a of result.r1) stats[a].madeConfSemis++;   // won round 1
+      for (const a of result.r2) stats[a].madeConfFinals++;  // won round 2, playing in conf finals
+      stats[result.champ].madeFinals++;                     // won conf finals, advances to NBA Finals
+    }
+
+    const eastChamp = eastResult.champ, westChamp = westResult.champ;
+    const eastWinsTitle = Math.random() < seriesWinProbability(netrtgOf[eastChamp], netrtgOf[westChamp], true);
+    stats[eastWinsTitle ? eastChamp : westChamp].wonTitle++;
+  }
+
+  for (const t of valid) {
+    for (const key of ['madePlayoffs','madeConfSemis','madeConfFinals','madeFinals','wonTitle']) {
+      stats[t.abbr][key] = stats[t.abbr][key] / iterations;
+    }
+  }
+
+  return { east, west, stats, iterations };
+}
+
+
 function simulateSeasonRecords(teamNetrtg) {
   const teams = Object.keys(teamNetrtg);
   const schedule = buildSchedule(teams);
@@ -2374,10 +2494,10 @@ const RANK_WEIGHT_SUM = EMPIRICAL_RANK_SHARES.reduce((a,b) => a+b, 0);
 const RANK_WEIGHTS = EMPIRICAL_RANK_SHARES.map(s => s / RANK_WEIGHT_SUM);
 
 async function boot() {
-  const grid = document.getElementById('rankGrid');
+  const standingsWrap = document.getElementById('standingsWrap');
   const loading = document.getElementById('loading');
   const errorBox = document.getElementById('errorBox');
-  grid.innerHTML = ''; errorBox.style.display = 'none'; errorBox.innerHTML='';
+  standingsWrap.innerHTML = ''; errorBox.style.display = 'none'; errorBox.innerHTML='';
   loading.style.display = 'block';
   document.getElementById('statsBar').style.display = 'none';
   document.getElementById('controls').style.display = 'none';
@@ -2709,7 +2829,7 @@ runProjections = async function() {
   document.getElementById('statsBar').style.display = 'grid';
   document.getElementById('controls').style.display = 'flex';
   renderStats();
-  renderGrid();
+  renderStandings();
 };
 
     await runProjections();
@@ -2751,51 +2871,64 @@ function renderStats() {
   }
 }
 
-function renderGrid() {
-  const grid = document.getElementById('rankGrid');
-  const search = (document.getElementById('searchInput').value || '').toLowerCase();
-  const sortBy = document.getElementById('sortSelect').value;
+let LAST_PLAYOFF_SIM = null;
 
-  let list = TEAM_RESULTS.filter(t => !t.error);
-  if (search) {
-    list = list.filter(t => t.abbr.toLowerCase().includes(search) || (t.names||[]).some(n => n.toLowerCase().includes(search)));
+function renderStandings() {
+  const wrap = document.getElementById('standingsWrap');
+  const valid = TEAM_RESULTS.filter(t => !t.error);
+  if (!valid.length) { wrap.innerHTML = '<div style="text-align:center;padding:3rem;color:var(--text-muted);">No teams available.</div>'; return; }
+
+  LAST_PLAYOFF_SIM = runPlayoffSimulation(TEAM_RESULTS, 3000);
+  const { east, west, stats } = LAST_PLAYOFF_SIM;
+
+  function renderConference(teams, label) {
+    const rows = teams.map((t, i) => {
+      const seed = i + 1;
+      const s = stats[t.abbr];
+      const zone = seed <= 6 ? 'locked' : seed <= 10 ? 'playin' : 'out';
+      return `<tr class="standings-row zone-${zone}" data-abbr="${t.abbr}">
+        <td class="seed-cell">${seed}</td>
+        <td class="team-cell">${t.abbr}</td>
+        <td>${t.record.wins}-${t.record.losses}</td>
+        <td>${t.netrtg>=0?'+':''}${t.netrtg.toFixed(1)}</td>
+        <td>${(s.madePlayoffs*100).toFixed(0)}%</td>
+        <td>${(s.madeConfFinals*100).toFixed(0)}%</td>
+        <td>${(s.madeFinals*100).toFixed(0)}%</td>
+        <td>${(s.wonTitle*100).toFixed(1)}%</td>
+      </tr>`;
+    }).join('');
+    return `
+      <div class="conf-table-wrap">
+        <h3>${label}</h3>
+        <table class="standings-table">
+          <thead><tr>
+            <th>Seed</th><th>Team</th><th>Record</th><th>NetRtg</th>
+            <th>Playoffs</th><th>Conf. Finals</th><th>NBA Finals</th><th>Title</th>
+          </tr></thead>
+          <tbody>${rows}</tbody>
+        </table>
+      </div>
+    `;
   }
-  if (sortBy === 'net') list.sort((a,b) => b.netrtg - a.netrtg);
-  else if (sortBy === 'ortg') list.sort((a,b) => b.ortg - a.ortg);
-  else if (sortBy === 'drtg') list.sort((a,b) => a.drtg - b.drtg);
-  else if (sortBy === 'az') list.sort((a,b) => a.abbr.localeCompare(b.abbr));
 
-  grid.innerHTML = list.map((t, i) => {
-    const cls = t.netrtg >= 0 ? 'pos' : 'neg';
-    const rookieCount = t.quality.filter(q => q.isRookie).length;
-    const chips = [
-      ...t.viability.notes.slice(0,2).map(n => `<span class="chip warn">${n}</span>`),
-      ...(rookieCount ? [`<span class="chip rookie">${rookieCount} rookie${rookieCount>1?'s':''}</span>`] : []),
-    ];
-    if (!chips.length) chips.push('<span class="chip ok">No structural flags</span>');
-    return `<div class="team-card" data-abbr="${t.abbr}">
-      <div class="rank">#${i+1}</div>
-      <div class="team-name">${t.abbr}</div>
-      <div class="starters-line">${t.names.join(' · ')}</div>
-      <div class="net-row"><span class="net-value ${cls}">${t.record.wins}-${t.record.losses}</span><span class="net-label">Proj Record</span></div>
-      <div class="sub-ratings">NetRtg ${t.netrtg>=0?'+':''}${t.netrtg.toFixed(1)} &nbsp;·&nbsp; ORtg ${t.ortg} &nbsp;·&nbsp; DRtg ${t.drtg}${t.top10 ? ` &nbsp;·&nbsp; top-${t.top10.length}-of-${t.top10.length > 10 ? 243 : 32}` : ' &nbsp;·&nbsp; starters only'}</div>
-      <div class="chip-row">${chips.join('')}</div>
-    </div>`;
-  }).join('');
+  wrap.innerHTML = `
+    <div class="standings-legend">
+      <span class="legend-item"><span class="legend-swatch locked"></span> Clinches playoff seed (1-6)</span>
+      <span class="legend-item"><span class="legend-swatch playin"></span> Play-In Tournament (7-10)</span>
+      <span class="legend-item"><span class="legend-swatch out"></span> Misses postseason</span>
+      <span class="legend-item sim-note">Odds from a ${LAST_PLAYOFF_SIM.iterations.toLocaleString()}-iteration simulation including the Play-In Tournament</span>
+    </div>
+    <div class="standings-columns">
+      ${renderConference(east, 'Eastern Conference')}
+      ${renderConference(west, 'Western Conference')}
+    </div>
+  `;
 
-  if (!list.length) grid.innerHTML = '<div style="grid-column:1/-1;text-align:center;padding:3rem;color:var(--text-muted);">No teams match.</div>';
-
-  // Real event listeners instead of inline onclick -- more robust in
-  // general (some hosting setups silently block inline HTML event
-  // handler attributes via CSP while the main script still runs fine,
-  // which would explain clicks doing nothing with no visible JS error).
-  grid.querySelectorAll('.team-card').forEach(card => {
-    card.addEventListener('click', () => openDetail(card.dataset.abbr));
+  wrap.querySelectorAll('.standings-row').forEach(row => {
+    row.addEventListener('click', () => openDetail(row.dataset.abbr));
   });
 }
 
-document.getElementById('searchInput').addEventListener('input', renderGrid);
-document.getElementById('sortSelect').addEventListener('change', renderGrid);
 document.getElementById('refreshBtn').addEventListener('click', boot);
 document.getElementById('detailOverlay').addEventListener('click', (e) => {
   if (e.target === e.currentTarget) closeDetail();
