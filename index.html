@@ -257,7 +257,23 @@ const DEFAULT_SETTINGS = {
   rookieDiscountMax: 3.5,
   sampleDiscountMax: 3.0,
 };
+
+// Light Mode: zeroes out everything except Raw Talent (rat365 + DEF_SCORE,
+// via defToRatFactor/defScale, which stay untouched), the Stacking
+// Penalty, and whatever Starting Five NetRtg falls out of just those --
+// Lineup Fit, Uncertainty Discounts, and Structural Penalties all get
+// set to 0. Active by default per direct request. "Reset to Defaults"
+// still restores the full model (exits Light Mode entirely) -- kept as
+// a distinct, unambiguous action from toggling Light Mode off, which
+// instead restores whatever custom values were in place before it was
+// enabled.
+const LIGHT_MODE_ZEROED_KEYS = ['fitWeight', 'rookieDiscountMax', 'sampleDiscountMax', 'structuralPenaltyWeight'];
+let lightModeActive = true;
+let preLightModeSettings = { ...DEFAULT_SETTINGS };
+
 let SETTINGS = { ...DEFAULT_SETTINGS };
+for (const key of LIGHT_MODE_ZEROED_KEYS) SETTINGS[key] = 0;
+
 const BOOST_GP_FULL = 40, BOOST_GP_NONE = 50;
 const COMP_BLK = 5, COMP_STL = 5, COMP_DREB = 40;
 const RECENCY_DECAY = 0.65;
@@ -2812,17 +2828,6 @@ const TUNE_SCHEMA = [
   { key: 'defScale', label: 'Defense Modulation Strength', min: 0, max: 0.25, step: 0.01,
     desc: 'How much DEF_SCORE adjusts a player\'s value on top of their rat365 base. Reduced from the original 0.18 (which let defense compete with rat365 on nearly even terms) so defense acts as a real but secondary modulation, not a co-equal input.' },
 ];
-
-// Light Mode: zeroes out everything except Raw Talent (rat365 + DEF_SCORE,
-// via defToRatFactor/defScale, which stay untouched), the Stacking
-// Penalty, and whatever Starting Five NetRtg falls out of just those --
-// Lineup Fit, Uncertainty Discounts, and Structural Penalties all get
-// set to 0. Remembers the settings from just before toggling on, so
-// turning it back off restores whatever custom values were in place
-// rather than silently reverting to defaults.
-const LIGHT_MODE_ZEROED_KEYS = ['fitWeight', 'rookieDiscountMax', 'sampleDiscountMax', 'structuralPenaltyWeight'];
-let lightModeActive = false;
-let preLightModeSettings = null;
 
 function renderTunePanel() {
   const panel = document.getElementById('tunePanel');
