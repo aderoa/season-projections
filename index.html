@@ -113,6 +113,30 @@ select { background:var(--surface); border:1px solid var(--border); border-radiu
 .standings-row.zone-locked { border-left:3px solid #15803d; }
 .standings-row.zone-playin { border-left:3px solid #d97706; }
 .standings-row.zone-out { border-left:3px solid var(--border); }
+
+.bracket-section { margin-top:2.5rem; }
+.bracket-section h2 { font-size:1.15rem; margin-bottom:1.2rem; }
+.bracket-note { font-size:0.72rem; font-weight:400; color:var(--text-muted); }
+.playin-columns { display:grid; grid-template-columns:1fr 1fr; gap:2rem; margin-bottom:2rem; }
+@media(max-width:900px) { .playin-columns { grid-template-columns:1fr; } }
+.playin-wrap h4, .conf-bracket-wrap h4 { font-size:0.85rem; margin:0 0 0.7rem; color:var(--text-muted); text-transform:uppercase; letter-spacing:0.03em; }
+.playin-games { display:flex; gap:0.8rem; flex-wrap:wrap; }
+.bracket-columns { display:grid; grid-template-columns:1fr 1fr; gap:2rem; margin-bottom:2rem; }
+@media(max-width:900px) { .bracket-columns { grid-template-columns:1fr; } }
+.bracket-rounds { display:flex; gap:1.2rem; align-items:flex-start; flex-wrap:wrap; }
+.bracket-round { display:flex; flex-direction:column; gap:0.6rem; min-width:140px; }
+.bracket-round-label { font-size:0.62rem; text-transform:uppercase; letter-spacing:0.04em; color:var(--text-muted); font-family:'JetBrains Mono',monospace; }
+.matchup-box { background:var(--surface); border:1px solid var(--border); border-radius:8px; padding:0.6rem 0.8rem; min-width:110px; }
+.matchup-label { font-size:0.6rem; color:var(--text-muted); margin-bottom:0.3rem; font-family:'JetBrains Mono',monospace; }
+.matchup-team { font-size:0.85rem; padding:0.15rem 0; cursor:pointer; color:var(--text-muted); font-weight:500; }
+.matchup-team.winner { color:var(--text); font-weight:700; }
+.matchup-team:hover { text-decoration:underline; }
+.matchup-prob { font-size:0.65rem; color:var(--accent); font-family:'JetBrains Mono',monospace; margin-top:0.25rem; }
+.finals-wrap { text-align:center; padding:1.5rem; background:var(--surface2); border-radius:12px; }
+.finals-wrap h4 { font-size:0.9rem; margin:0 0 0.9rem; text-transform:uppercase; letter-spacing:0.05em; color:var(--text-muted); }
+.finals-wrap .matchup-box { display:inline-block; margin-bottom:1rem; }
+.champion-banner { font-size:1.1rem; margin-top:0.5rem; }
+.champion-banner strong { color:var(--accent); font-size:1.3rem; }
 .team-card:hover { border-color:var(--accent); transform:translateY(-1px); box-shadow:0 4px 14px rgba(0,0,0,0.06); }
 .team-card .rank { position:absolute; top:1rem; right:1.1rem; font-family:'JetBrains Mono',monospace; font-size:0.7rem; color:var(--text-muted); font-weight:600; }
 .team-card .team-name { font-weight:700; font-size:1.05rem; letter-spacing:-0.01em; margin-bottom:0.15rem; }
@@ -2342,6 +2366,44 @@ function seriesWinProbability(aNetrtg, bNetrtg, aIsHigherSeed) {
 // given its 8 seeds are still undetermined (seeds 1-6 locked in from
 // regular-season finish, 7-10 competing in the play-in). Returns the
 // eventual conference champion.
+// Deterministic version: picks the higher-probability winner at every
+// step instead of a random draw, producing one consistent "most likely"
+// path all the way to a single projected champion -- for the bracket
+// display, where a random Monte Carlo sample would look arbitrary and
+// differ every reload. Returns full matchup detail (both teams + win
+// probability), not just winners, so the bracket UI can show real
+// matchups, not just a final answer.
+function deterministicConferencePlayoffs(standings) {
+  const netrtg = {}; for (const t of standings) netrtg[t.abbr] = t.netrtg;
+  const seed = i => standings[i-1].abbr;
+
+  function playInGame(a, b) {
+    const p = winProbability(netrtg[a], netrtg[b]); // a treated as home/higher seed
+    return { a, b, winner: p >= 0.5 ? a : b, prob: p >= 0.5 ? p : 1-p };
+  }
+  const g1 = playInGame(seed(7), seed(8));
+  const g1Loser = g1.winner === seed(7) ? seed(8) : seed(7);
+  const g2 = playInGame(seed(9), seed(10));
+  const g3 = playInGame(g1Loser, g2.winner);
+
+  const finalSeeds = [seed(1), seed(2), seed(3), seed(4), seed(5), seed(6), g1.winner, g3.winner];
+
+  function playSeries(aIdx, bIdx) {
+    const a = finalSeeds[aIdx], b = finalSeeds[bIdx];
+    const p = seriesWinProbability(netrtg[a], netrtg[b], true);
+    return { a, b, winner: p >= 0.5 ? a : b, prob: p >= 0.5 ? p : 1-p };
+  }
+  const round1 = [ playSeries(0,7), playSeries(3,4), playSeries(2,5), playSeries(1,6) ];
+  function playSeriesTeams(a, b) {
+    const p = seriesWinProbability(netrtg[a], netrtg[b], true);
+    return { a, b, winner: p >= 0.5 ? a : b, prob: p >= 0.5 ? p : 1-p };
+  }
+  const round2 = [ playSeriesTeams(round1[0].winner, round1[1].winner), playSeriesTeams(round1[2].winner, round1[3].winner) ];
+  const confFinals = playSeriesTeams(round2[0].winner, round2[1].winner);
+
+  return { playIn: { g1, g2, g3 }, finalSeeds, round1, round2, confFinals, champ: confFinals.winner };
+}
+
 function simulateConferencePlayoffs(standings) {
   // standings: array of 10 teams (abbr + netrtg), sorted by seed 1-10.
   const netrtg = {}; for (const t of standings) netrtg[t.abbr] = t.netrtg;
@@ -2375,6 +2437,25 @@ function simulateConferencePlayoffs(standings) {
   // Conference finals
   const champ = Math.random() < seriesWinProbability(netrtg[r2[0]], netrtg[r2[1]], true) ? r2[0] : r2[1];
   return { finalSeeds, r1, r2, champ };
+}
+
+function runDeterministicPlayoffs(teamResults) {
+  const valid = teamResults.filter(t => !t.error);
+  const east = valid.filter(t => teamConference(t.abbr) === 'East').sort((a,b) => b.netrtg - a.netrtg);
+  const west = valid.filter(t => teamConference(t.abbr) === 'West').sort((a,b) => b.netrtg - a.netrtg);
+  const netrtgOf = {}; for (const t of valid) netrtgOf[t.abbr] = t.netrtg;
+
+  const eastResult = deterministicConferencePlayoffs(east);
+  const westResult = deterministicConferencePlayoffs(west);
+
+  const finalsP = seriesWinProbability(netrtgOf[eastResult.champ], netrtgOf[westResult.champ], true);
+  const finals = {
+    a: eastResult.champ, b: westResult.champ,
+    winner: finalsP >= 0.5 ? eastResult.champ : westResult.champ,
+    prob: finalsP >= 0.5 ? finalsP : 1-finalsP,
+  };
+
+  return { east, west, eastResult, westResult, finals, champion: finals.winner };
 }
 
 function runPlayoffSimulation(teamResults, iterations = 3000) {
@@ -2880,6 +2961,7 @@ function renderStandings() {
 
   LAST_PLAYOFF_SIM = runPlayoffSimulation(TEAM_RESULTS, 3000);
   const { east, west, stats } = LAST_PLAYOFF_SIM;
+  const det = runDeterministicPlayoffs(TEAM_RESULTS);
 
   function renderConference(teams, label) {
     const rows = teams.map((t, i) => {
@@ -2911,6 +2993,54 @@ function renderStandings() {
     `;
   }
 
+  // Single matchup box: both teams, winner bolded, win probability shown.
+  // Reused for play-in games, every bracket round, and the NBA Finals.
+  function matchupBox(m, label) {
+    if (!m) return '';
+    const aWin = m.winner === m.a;
+    return `<div class="matchup-box" data-a="${m.a}" data-b="${m.b}">
+      ${label ? `<div class="matchup-label">${label}</div>` : ''}
+      <div class="matchup-team ${aWin?'winner':''}" data-abbr="${m.a}">${m.a}</div>
+      <div class="matchup-team ${!aWin?'winner':''}" data-abbr="${m.b}">${m.b}</div>
+      <div class="matchup-prob">${(m.prob*100).toFixed(0)}%</div>
+    </div>`;
+  }
+
+  function renderPlayIn(result, label) {
+    return `
+      <div class="playin-wrap">
+        <h4>${label} Play-In</h4>
+        <div class="playin-games">
+          ${matchupBox(result.playIn.g1, '7 vs 8')}
+          ${matchupBox(result.playIn.g2, '9 vs 10')}
+          ${matchupBox(result.playIn.g3, 'Final Play-In Game (8-seed)')}
+        </div>
+      </div>
+    `;
+  }
+
+  function renderConfBracket(result, label) {
+    return `
+      <div class="conf-bracket-wrap">
+        <h4>${label} Bracket</h4>
+        <div class="bracket-rounds">
+          <div class="bracket-round">
+            <div class="bracket-round-label">First Round</div>
+            ${result.round1.map(m => matchupBox(m)).join('')}
+          </div>
+          <div class="bracket-round">
+            <div class="bracket-round-label">Conf. Semifinals</div>
+            ${result.round2.map(m => matchupBox(m)).join('')}
+          </div>
+          <div class="bracket-round">
+            <div class="bracket-round-label">Conf. Finals</div>
+            ${matchupBox(result.confFinals)}
+          </div>
+        </div>
+      </div>
+    `;
+  }
+
   wrap.innerHTML = `
     <div class="standings-legend">
       <span class="legend-item"><span class="legend-swatch locked"></span> Clinches playoff seed (1-6)</span>
@@ -2922,10 +3052,30 @@ function renderStandings() {
       ${renderConference(east, 'Eastern Conference')}
       ${renderConference(west, 'Western Conference')}
     </div>
+
+    <div class="bracket-section">
+      <h2>Projected Playoff Bracket <span class="bracket-note">(most-likely outcome at every step, not a random sample)</span></h2>
+      <div class="playin-columns">
+        ${renderPlayIn(det.eastResult, 'Eastern')}
+        ${renderPlayIn(det.westResult, 'Western')}
+      </div>
+      <div class="bracket-columns">
+        ${renderConfBracket(det.eastResult, 'Eastern')}
+        ${renderConfBracket(det.westResult, 'Western')}
+      </div>
+      <div class="finals-wrap">
+        <h4>NBA Finals</h4>
+        ${matchupBox(det.finals)}
+        <div class="champion-banner">🏆 Projected Champion: <strong>${det.champion}</strong></div>
+      </div>
+    </div>
   `;
 
   wrap.querySelectorAll('.standings-row').forEach(row => {
     row.addEventListener('click', () => openDetail(row.dataset.abbr));
+  });
+  wrap.querySelectorAll('.matchup-team').forEach(el => {
+    el.addEventListener('click', () => openDetail(el.dataset.abbr));
   });
 }
 
