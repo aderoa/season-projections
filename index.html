@@ -251,6 +251,7 @@ const DEFAULT_SETTINGS = {
   // matched closely to OFF_SCALE=0.25, letting it compete on nearly
   // even terms) so it acts as a real but secondary modulation.
   defScale: 0.07,
+  structuralPenaltyWeight: 1.0,
   teamStackingRate: 1.75,
   homeAdvantage: 3.0,
   rookieDiscountMax: 3.5,
@@ -963,12 +964,14 @@ function projectLineup(names, positions) {
   const fitNet = ortgAdj - drtgAdj;
   const tsBonus = tsEfficiencyBonus(normalized);
   const via = viabilityAdjustments(stats, positions);
+  const structOrtgPen = via.ortgPen * SETTINGS.structuralPenaltyWeight;
+  const structDrtgPen = via.drtgPen * SETTINGS.structuralPenaltyWeight;
 
   const displayOrtg = LEAGUE_BASE + totalOff + ortgAdj;
   const displayDrtg = LEAGUE_BASE - totalDef + drtgAdj;
-  let ortg = displayOrtg + tsBonus - via.ortgPen;
-  let drtg = displayDrtg + via.drtgPen;
-  let netrtg = (totalOff + totalDef) + fitNet + tsBonus - via.ortgPen - via.drtgPen;
+  let ortg = displayOrtg + tsBonus - structOrtgPen;
+  let drtg = displayDrtg + structDrtgPen;
+  let netrtg = (totalOff + totalDef) + fitNet + tsBonus - structOrtgPen - structDrtgPen;
 
   // Direct uncertainty discount for any rookie in the lineup, scaled by
   // draft position -- a real coach trusts a consensus #1 pick far more
@@ -2810,6 +2813,17 @@ const TUNE_SCHEMA = [
     desc: 'How much DEF_SCORE adjusts a player\'s value on top of their rat365 base. Reduced from the original 0.18 (which let defense compete with rat365 on nearly even terms) so defense acts as a real but secondary modulation, not a co-equal input.' },
 ];
 
+// Light Mode: zeroes out everything except Raw Talent (rat365 + DEF_SCORE,
+// via defToRatFactor/defScale, which stay untouched), the Stacking
+// Penalty, and whatever Starting Five NetRtg falls out of just those --
+// Lineup Fit, Uncertainty Discounts, and Structural Penalties all get
+// set to 0. Remembers the settings from just before toggling on, so
+// turning it back off restores whatever custom values were in place
+// rather than silently reverting to defaults.
+const LIGHT_MODE_ZEROED_KEYS = ['fitWeight', 'rookieDiscountMax', 'sampleDiscountMax', 'structuralPenaltyWeight'];
+let lightModeActive = false;
+let preLightModeSettings = null;
+
 function renderTunePanel() {
   const panel = document.getElementById('tunePanel');
   panel.innerHTML = `
@@ -2819,15 +2833,21 @@ function renderTunePanel() {
           <h3>Tune Model</h3>
           <p>Adjust these directly and every team recomputes live -- no redeploy needed.</p>
         </div>
-        <button class="tune-reset" id="tuneResetBtn">Reset to defaults</button>
+        <div style="display:flex; align-items:center; gap:1rem;">
+          <label style="display:flex; align-items:center; gap:0.4rem; font-size:0.75rem; font-weight:600; cursor:pointer;">
+            <input type="checkbox" id="lightModeToggle" ${lightModeActive ? 'checked' : ''}> Light Mode
+          </label>
+          <button class="tune-reset" id="tuneResetBtn">Reset to defaults</button>
+        </div>
       </div>
+      <div class="tune-desc" style="margin-bottom:0.8rem;">Light Mode: only Raw Talent, Stacking Penalty, and whatever Starting Five NetRtg falls out of just those two -- Lineup Fit, Uncertainty Discounts, and Structural Penalties all zeroed.</div>
       <div class="tune-grid">
         ${TUNE_SCHEMA.map(s => `
           <div class="tune-row">
             <label for="tune_${s.key}">${s.label}</label>
             <div class="tune-desc">${s.desc}</div>
             <div class="tune-value-row">
-              <input type="range" id="tune_${s.key}" min="${s.min}" max="${s.max}" step="${s.step}" value="${SETTINGS[s.key]}">
+              <input type="range" id="tune_${s.key}" min="${s.min}" max="${s.max}" step="${s.step}" value="${SETTINGS[s.key]}" ${lightModeActive && LIGHT_MODE_ZEROED_KEYS.includes(s.key) ? 'disabled' : ''}>
               <span class="tune-value" id="tune_${s.key}_val">${SETTINGS[s.key]}</span>
             </div>
           </div>
@@ -2867,7 +2887,23 @@ function renderTunePanel() {
 
   document.getElementById('tuneResetBtn').addEventListener('click', () => {
     SETTINGS = { ...DEFAULT_SETTINGS };
+    lightModeActive = false;
+    preLightModeSettings = null;
     renderTunePanel(); // rebuild sliders at reset positions
+    triggerRecompute();
+  });
+
+  document.getElementById('lightModeToggle').addEventListener('change', (e) => {
+    if (e.target.checked) {
+      preLightModeSettings = { ...SETTINGS };
+      for (const key of LIGHT_MODE_ZEROED_KEYS) SETTINGS[key] = 0;
+      lightModeActive = true;
+    } else {
+      if (preLightModeSettings) SETTINGS = { ...preLightModeSettings };
+      lightModeActive = false;
+      preLightModeSettings = null;
+    }
+    renderTunePanel(); // rebuild sliders to reflect zeroed/restored values
     triggerRecompute();
   });
 }
