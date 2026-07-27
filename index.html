@@ -68,6 +68,15 @@ select { background:var(--surface); border:1px solid var(--border); border-radiu
 .tune-row input[type=range] { flex:1; accent-color:var(--accent); cursor:pointer; }
 .tune-row .tune-value { font-family:'JetBrains Mono',monospace; font-size:0.75rem; color:var(--accent); min-width:2.6em; text-align:right; }
 .tune-status { font-size:0.7rem; color:var(--text-muted); margin-top:0.8rem; min-height:1em; }
+.tracker-save-row { display:flex; gap:0.6rem; align-items:center; }
+.tracker-save-row input[type=text] { flex:1; padding:0.5rem 0.7rem; border:1px solid var(--border); border-radius:8px; font-family:inherit; font-size:0.82rem; }
+.tracker-compare-row { display:flex; align-items:center; gap:0.7rem; margin-top:1.2rem; font-size:0.8rem; }
+.tracker-compare-row select { padding:0.4rem 0.6rem; border:1px solid var(--border); border-radius:8px; font-family:inherit; font-size:0.8rem; flex:1; max-width:400px; }
+.tracker-list { display:flex; flex-direction:column; gap:0.4rem; }
+.tracker-item { display:flex; align-items:center; gap:0.8rem; padding:0.5rem 0.7rem; background:var(--surface2); border-radius:8px; font-size:0.8rem; }
+.tracker-item-date { color:var(--text-muted); font-size:0.7rem; font-family:'JetBrains Mono',monospace; margin-left:auto; }
+.tracker-delete { background:none; border:none; color:var(--text-muted); cursor:pointer; font-size:0.9rem; padding:0 0.3rem; }
+.tracker-delete:hover { color:#b91c1c; }
 .rawtalent-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(110px,1fr)); gap:0.4rem; }
 .rawtalent-item { display:flex; align-items:center; gap:0.4rem; padding:0.35rem 0.5rem; background:var(--surface2); border-radius:6px; font-family:'JetBrains Mono',monospace; font-size:0.72rem; }
 .rawtalent-item .rt-rank { color:var(--text-muted); font-size:0.62rem; }
@@ -201,10 +210,12 @@ select { background:var(--surface); border:1px solid var(--border); border-radiu
   <button class="ctrl-btn" id="refreshBtn">↻ Refresh</button>
   <button class="ctrl-btn" id="tuneBtn">⚙ Tune Model</button>
   <button class="ctrl-btn" id="rankingsBtn">📊 Category Rankings</button>
+  <button class="ctrl-btn" id="trackerBtn">📸 Tracker</button>
 </div>
 
 <div id="tunePanel" class="tune-panel" style="display:none;"></div>
 <div id="rankingsPanel" class="tune-panel" style="display:none;"></div>
+<div id="trackerPanel" class="tune-panel" style="display:none;"></div>
 
 <div class="container">
   <div id="loading" class="loading-overlay">
@@ -3454,6 +3465,171 @@ document.getElementById('rankingsBtn').addEventListener('click', () => {
     renderRankingsPanel(); // always rebuild -- data may have changed via Tune Model
     panel.style.display = 'block';
     document.getElementById('rankingsBtn').classList.add('active');
+  }
+});
+
+// Projection Tracker: saves timestamped snapshots of all 30 teams'
+// projections to localStorage -- appropriate here since this is a
+// standalone hosted web app (deployed via Cloudflare/GitHub Pages), not
+// a Claude artifact, so localStorage persists correctly across reloads
+// on the same browser. Lets the user save a snapshot before a roster
+// move (a signing, a trade), then compare it against current
+// projections after refreshing, to see exactly how that move shifted
+// each team's numbers rather than just eyeballing two separate views.
+const TRACKER_STORAGE_KEY = 'hoopsmatic_predictions_snapshots';
+const TRACKER_MAX_SNAPSHOTS = 30;
+
+function loadSnapshots() {
+  try {
+    const raw = localStorage.getItem(TRACKER_STORAGE_KEY);
+    return raw ? JSON.parse(raw) : [];
+  } catch (e) {
+    console.warn('[Tracker] Failed to load snapshots:', e);
+    return [];
+  }
+}
+
+function saveSnapshotsToStorage(snapshots) {
+  try {
+    localStorage.setItem(TRACKER_STORAGE_KEY, JSON.stringify(snapshots));
+    return true;
+  } catch (e) {
+    console.warn('[Tracker] Failed to save snapshots:', e);
+    return false;
+  }
+}
+
+function captureCurrentSnapshot(label) {
+  const valid = TEAM_RESULTS.filter(t => !t.error);
+  const teams = {};
+  for (const t of valid) {
+    teams[t.abbr] = { wins: t.record.wins, losses: t.record.losses, netrtg: t.netrtg, starters: t.names };
+  }
+  return {
+    id: Date.now(),
+    label: label || `Snapshot ${new Date().toLocaleString()}`,
+    timestamp: new Date().toISOString(),
+    teams,
+  };
+}
+
+function renderComparison(snap, resultEl) {
+  const valid = TEAM_RESULTS.filter(t => !t.error);
+  const rows = valid.map(t => {
+    const old = snap.teams[t.abbr];
+    if (!old) return null;
+    const winDelta = t.record.wins - old.wins;
+    const netrtgDelta = t.netrtg - old.netrtg;
+    if (Math.abs(winDelta) < 1 && Math.abs(netrtgDelta) < 0.1) return null; // skip unchanged teams
+    return { abbr: t.abbr, old, current: t, winDelta, netrtgDelta };
+  }).filter(Boolean).sort((a,b) => Math.abs(b.netrtgDelta) - Math.abs(a.netrtgDelta));
+
+  if (!rows.length) {
+    resultEl.innerHTML = '<div class="tune-status">No meaningful changes detected for any team since this snapshot.</div>';
+    return;
+  }
+
+  resultEl.innerHTML = `
+    <table class="standings-table" style="margin-top:0.8rem;">
+      <thead><tr><th>Team</th><th>Record</th><th>NetRtg</th><th>Change</th></tr></thead>
+      <tbody>
+        ${rows.map(r => `
+          <tr>
+            <td class="team-cell">${r.abbr}</td>
+            <td>${r.old.wins}-${r.old.losses} &rarr; ${r.current.record.wins}-${r.current.record.losses}</td>
+            <td>${r.old.netrtg>=0?'+':''}${r.old.netrtg.toFixed(1)} &rarr; ${r.current.netrtg>=0?'+':''}${r.current.netrtg.toFixed(1)}</td>
+            <td style="color:${r.netrtgDelta>=0?'#15803d':'#b91c1c'};font-weight:700;">${r.netrtgDelta>=0?'+':''}${r.netrtgDelta.toFixed(1)} (${r.winDelta>=0?'+':''}${r.winDelta}W)</td>
+          </tr>
+        `).join('')}
+      </tbody>
+    </table>
+  `;
+}
+
+function renderTrackerPanel() {
+  const panel = document.getElementById('trackerPanel');
+  const snapshots = loadSnapshots();
+
+  panel.innerHTML = `
+    <div class="tune-panel-inner">
+      <div class="tune-panel-header">
+        <div>
+          <h3>Projection Tracker</h3>
+          <p>Save a snapshot before a roster move, then compare it against current projections after refreshing to see exactly what changed.</p>
+        </div>
+      </div>
+      <div class="tracker-save-row">
+        <input type="text" id="snapshotLabelInput" placeholder="Label (e.g. 'Before Giannis trade')">
+        <button class="ctrl-btn" id="saveSnapshotBtn">📸 Save Current Snapshot</button>
+      </div>
+      <div class="tune-status" id="trackerStatus"></div>
+      ${snapshots.length ? `
+        <div class="tracker-compare-row">
+          <label>Compare current projections against:</label>
+          <select id="compareSelect">
+            <option value="">-- Select a snapshot --</option>
+            ${snapshots.slice().reverse().map(s => `<option value="${s.id}">${s.label} (${new Date(s.timestamp).toLocaleString()})</option>`).join('')}
+          </select>
+        </div>
+        <div id="compareResult"></div>
+        <div class="tracker-list">
+          <div class="section-label" style="margin-top:1.2rem;">Saved Snapshots</div>
+          ${snapshots.slice().reverse().map(s => `
+            <div class="tracker-item">
+              <span>${s.label}</span>
+              <span class="tracker-item-date">${new Date(s.timestamp).toLocaleString()}</span>
+              <button class="tracker-delete" data-id="${s.id}">✕</button>
+            </div>
+          `).join('')}
+        </div>
+      ` : '<div class="tune-status">No snapshots saved yet.</div>'}
+    </div>
+  `;
+
+  document.getElementById('saveSnapshotBtn').addEventListener('click', () => {
+    const label = document.getElementById('snapshotLabelInput').value.trim();
+    const snap = captureCurrentSnapshot(label);
+    const all = loadSnapshots();
+    all.push(snap);
+    while (all.length > TRACKER_MAX_SNAPSHOTS) all.shift();
+    const ok = saveSnapshotsToStorage(all);
+    document.getElementById('trackerStatus').textContent = ok ? `Saved "${snap.label}".` : 'Failed to save -- browser storage may be full or unavailable.';
+    renderTrackerPanel();
+  });
+
+  const compareSelect = document.getElementById('compareSelect');
+  if (compareSelect) {
+    compareSelect.addEventListener('change', () => {
+      const id = parseFloat(compareSelect.value);
+      const resultEl = document.getElementById('compareResult');
+      if (!id) { resultEl.innerHTML = ''; return; }
+      const snap = snapshots.find(s => s.id === id);
+      if (!snap) return;
+      renderComparison(snap, resultEl);
+    });
+  }
+
+  panel.querySelectorAll('.tracker-delete').forEach(btn => {
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const id = parseFloat(btn.dataset.id);
+      const all = loadSnapshots().filter(s => s.id !== id);
+      saveSnapshotsToStorage(all);
+      renderTrackerPanel();
+    });
+  });
+}
+
+document.getElementById('trackerBtn').addEventListener('click', () => {
+  const panel = document.getElementById('trackerPanel');
+  const isOpen = panel.style.display !== 'none';
+  if (isOpen) {
+    panel.style.display = 'none';
+    document.getElementById('trackerBtn').classList.remove('active');
+  } else {
+    renderTrackerPanel();
+    panel.style.display = 'block';
+    document.getElementById('trackerBtn').classList.add('active');
   }
 });
 
