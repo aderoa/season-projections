@@ -54,6 +54,20 @@ select { background:var(--surface); border:1px solid var(--border); border-radiu
 .footer a { color:var(--accent); text-decoration:none; }
 
 @media(max-width:900px) { .stats-bar{grid-template-columns:repeat(2,1fr);} .controls{flex-direction:column;} .search-box{min-width:100%;} }
+.tune-panel { max-width:1400px; margin:0.75rem auto 0; padding:1.1rem 2rem 1.3rem; }
+.tune-panel-inner { background:var(--surface); border:1px solid var(--border); border-radius:12px; padding:1.1rem 1.3rem 1.3rem; }
+.tune-panel-header { display:flex; justify-content:space-between; align-items:baseline; margin-bottom:0.9rem; }
+.tune-panel-header h3 { font-size:0.85rem; font-weight:700; margin:0; }
+.tune-panel-header p { font-size:0.72rem; color:var(--text-muted); margin:0.2rem 0 0; }
+.tune-reset { font-size:0.72rem; color:var(--accent); background:none; border:none; cursor:pointer; font-family:inherit; white-space:nowrap; }
+.tune-reset:hover { text-decoration:underline; }
+.tune-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(260px,1fr)); gap:1rem 1.5rem; }
+.tune-row label { display:block; font-size:0.75rem; font-weight:600; color:var(--text); margin-bottom:0.15rem; }
+.tune-row .tune-desc { font-size:0.68rem; color:var(--text-muted); margin-bottom:0.4rem; line-height:1.35; }
+.tune-row .tune-value-row { display:flex; align-items:center; gap:0.6rem; }
+.tune-row input[type=range] { flex:1; accent-color:var(--accent); cursor:pointer; }
+.tune-row .tune-value { font-family:'JetBrains Mono',monospace; font-size:0.75rem; color:var(--accent); min-width:2.6em; text-align:right; }
+.tune-status { font-size:0.7rem; color:var(--text-muted); margin-top:0.8rem; min-height:1em; }
 @media(max-width:600px) { .stats-bar{grid-template-columns:1fr 1fr;gap:0.5rem;} .stat-card{padding:0.75rem;} .stat-card .value{font-size:1.1rem;} .header{padding:1.25rem 1rem 1rem;} .header h1{font-size:1.25rem;} }
 
 /* === PAGE-SPECIFIC: projection grid & detail view === */
@@ -136,7 +150,10 @@ select { background:var(--surface); border:1px solid var(--border); border-radiu
     </select>
   </div>
   <button class="ctrl-btn" id="refreshBtn">↻ Refresh</button>
+  <button class="ctrl-btn" id="tuneBtn">⚙ Tune Model</button>
 </div>
+
+<div id="tunePanel" class="tune-panel" style="display:none;"></div>
 
 <div class="container">
   <div id="loading" class="loading-overlay">
@@ -186,7 +203,20 @@ const OFF_CALIB = 12, OFF_SCALE = 0.25;
 const DEF_CALIB = 10, DEF_SCALE = 0.18;
 const DEF_TO_RAT_FACTOR = 0.5;
 const LEAGUE_BASE = 115;
-const FIT_WEIGHT = 0.35;
+
+// User-adjustable model parameters, exposed via the Tune Model panel.
+// Kept as a single mutable object (rather than separate consts) so the
+// UI can iterate over a schema to build sliders, reset to defaults, and
+// trigger a live recompute on change.
+const DEFAULT_SETTINGS = {
+  fitWeight: 0.35,
+  shrinkageRetention: 0.5,
+  teamStackingRate: 1.75,
+  homeAdvantage: 3.0,
+  rookieDiscountMax: 3.5,
+  sampleDiscountMax: 3.0,
+};
+let SETTINGS = { ...DEFAULT_SETTINGS };
 const BOOST_GP_FULL = 40, BOOST_GP_NONE = 50;
 const COMP_BLK = 5, COMP_STL = 5, COMP_DREB = 40;
 const RECENCY_DECAY = 0.65;
@@ -240,14 +270,12 @@ const MAX_ROOKIE_RATING = 14.0;    // calibrated against Cooper Flagg's real rat
 // later picks get a substantially larger one. Uses the same exponential
 // shape as rookieRating's draftFactor, inverted, so the scale is
 // consistent with how draft position already affects rating elsewhere.
-const ROOKIE_DISCOUNT_MIN = 0.5;  // applied even to a #1 overall pick
-const ROOKIE_DISCOUNT_MAX = 3.5;  // applied to the latest picks (~#60)
+const ROOKIE_DISCOUNT_MIN = 0.5;  // applied even to a #1 overall pick -- fixed floor, not adjustable
 
 // Regression-to-the-mean shrinkage retention (see generateAndRankCombos
-// for the full rationale). True top-level so both the combo search and
-// the starting-five calculation (which needs the identical treatment
-// for consistency -- see the team-loop below) can use the same value.
-const SHRINKAGE_RETENTION = 0.5;
+// for the full rationale). Now sourced from SETTINGS.shrinkageRetention
+// so it's user-adjustable and shared identically by the combo search
+// and the starting-five calculation.
 
 // Extended beyond true rookies: a player with a thin CAREER sample (e.g.
 // 40 total games, all in one season) carries real uncertainty even
@@ -258,7 +286,6 @@ const SHRINKAGE_RETENTION = 0.5;
 // this player really." Scales the same way: thinner sample = larger
 // discount, tapering to zero once a player has enough total games to be
 // considered genuinely established.
-const SAMPLE_DISCOUNT_MAX = 3.0;        // for the thinnest non-rookie samples
 const CAREER_GAMES_ESTABLISHED = 250;   // total career GP at which this discount reaches zero
 
 function sampleUncertaintyDiscount(quality) {
@@ -268,12 +295,12 @@ function sampleUncertaintyDiscount(quality) {
       const dp = q.draftPos && q.draftPos >= 1 && q.draftPos <= 60 ? q.draftPos : 60;
       const draftFactor = Math.exp(-ROOKIE_DRAFT_DECAY * (dp - 1));
       const uncertaintyFactor = 1 - draftFactor; // 0 at pick 1, ->1 at pick 60
-      total += ROOKIE_DISCOUNT_MIN + (ROOKIE_DISCOUNT_MAX - ROOKIE_DISCOUNT_MIN) * uncertaintyFactor;
+      total += ROOKIE_DISCOUNT_MIN + (SETTINGS.rookieDiscountMax - ROOKIE_DISCOUNT_MIN) * uncertaintyFactor;
     } else {
       const gp = q.totalCareerGP || 0;
       if (gp >= CAREER_GAMES_ESTABLISHED) continue; // fully established -- no discount
       const uncertaintyFactor = 1 - gp / CAREER_GAMES_ESTABLISHED;
-      total += SAMPLE_DISCOUNT_MAX * uncertaintyFactor;
+      total += SETTINGS.sampleDiscountMax * uncertaintyFactor;
     }
   }
   return total;
@@ -828,10 +855,6 @@ function projectLineup(names, positions) {
   const stackingFactor = Math.max(0.5, 1 - STACKING_DIMINISH_RATE * Math.max(0, strongCount - 2));
   const totalOff = totalOffRaw * stackingFactor;
   const totalDef = totalDefRaw * stackingFactor;
-  if (names.includes('Jalen Brunson')) {
-    console.log('[STACK DEBUG]', names.join(','), '| strongCount:', strongCount, '| stackingFactor:', stackingFactor,
-      '| totalOffRaw+totalDefRaw:', (totalOffRaw+totalDefRaw).toFixed(2), '-> totalOff+totalDef:', (totalOff+totalDef).toFixed(2));
-  }
 
   const stats = [];
   for (let i = 0; i < names.length; i++) {
@@ -866,8 +889,8 @@ function projectLineup(names, positions) {
     const dim = coefs.dimensions[key];
     const bucket = dim ? dim.buckets[String(value)] : null;
     if (!bucket) continue;
-    ortgAdj += (bucket.ortg_adj - oBase) * FIT_WEIGHT;
-    drtgAdj += (bucket.drtg_adj - dBase) * FIT_WEIGHT;
+    ortgAdj += (bucket.ortg_adj - oBase) * SETTINGS.fitWeight;
+    drtgAdj += (bucket.drtg_adj - dBase) * SETTINGS.fitWeight;
   }
   const fitNet = ortgAdj - drtgAdj;
   const tsBonus = tsEfficiencyBonus(normalized);
@@ -2175,11 +2198,10 @@ function normalCDF(x) {
 // (points per 100 possessions) is treated as roughly equivalent to
 // expected point margin for a single game, since an NBA game runs close
 // to 100 possessions per team.
-const HOME_ADVANTAGE_PTS = 3.0;
 const GAME_MARGIN_SD = 12.0;
 
 function winProbability(homeNetrtg, awayNetrtg) {
-  const expectedMargin = (homeNetrtg - awayNetrtg) + HOME_ADVANTAGE_PTS;
+  const expectedMargin = (homeNetrtg - awayNetrtg) + SETTINGS.homeAdvantage;
   return normalCDF(expectedMargin / GAME_MARGIN_SD);
 }
 
@@ -2214,6 +2236,10 @@ function simulateSeasonRecords(teamNetrtg) {
 // ORCHESTRATION
 // =====================================================
 let TEAM_RESULTS = [];
+// Assigned inside boot() once all external data is loaded; re-callable
+// afterward by the Tune Model sliders to recompute all 30 teams using
+// updated SETTINGS values without re-fetching any external data.
+let runProjections = null;
 
 async function loadPredictions() {
   // predictions.json is a derived convenience file that only gets pushed
@@ -2434,23 +2460,10 @@ function generateAndRankCombos(units) {
   const allDrtg = combos.map(c => c.result.drtg);
   const comboMeanDrtg = allDrtg.reduce((a,b)=>a+b,0) / allDrtg.length;
 
-  if (units[0].names.includes('Jalen Brunson')) {
-    const withDiscount = combos.filter(c => (c.result.rookieDiscount||0) > 0);
-    const avgDiscount = withDiscount.length ? withDiscount.reduce((s,c)=>s+c.result.rookieDiscount,0)/withDiscount.length : 0;
-    const avgStackFactor = combos.reduce((s,c)=>s+(c.result.stackingFactor||1),0)/combos.length;
-    console.log('[POOL DEBUG] NYK combo pool: n=', combos.length,
-      '| comboMeanNetrtg:', comboMeanNetrtg.toFixed(2),
-      '| combos with sample-discount>0:', withDiscount.length, '/ 243, avg discount:', avgDiscount.toFixed(2),
-      '| avg stackingFactor across pool:', avgStackFactor.toFixed(3));
-    const netrtgsSorted = [...allNetrtg].sort((a,b)=>a-b);
-    console.log('[POOL DEBUG] netrtg range: min=', netrtgsSorted[0].toFixed(1), 'max=', netrtgsSorted[netrtgsSorted.length-1].toFixed(1),
-      'median=', netrtgsSorted[Math.floor(netrtgsSorted.length/2)].toFixed(1));
-  }
-
   for (const combo of selected) {
     const r = combo.result;
-    const shrunkOrtg = comboMeanOrtg + SHRINKAGE_RETENTION * (r.ortg - comboMeanOrtg);
-    const shrunkDrtg = comboMeanDrtg + SHRINKAGE_RETENTION * (r.drtg - comboMeanDrtg);
+    const shrunkOrtg = comboMeanOrtg + SETTINGS.shrinkageRetention * (r.ortg - comboMeanOrtg);
+    const shrunkDrtg = comboMeanDrtg + SETTINGS.shrinkageRetention * (r.drtg - comboMeanDrtg);
     combo.result = { ...r,
       rawNetrtg: r.netrtg, rawOrtg: r.ortg, rawDrtg: r.drtg,
       ortg: Math.round(shrunkOrtg*10)/10, drtg: Math.round(shrunkDrtg*10)/10,
@@ -2460,12 +2473,13 @@ function generateAndRankCombos(units) {
   return { selected, comboMeanOrtg, comboMeanDrtg };
 }
 
-setStatus('Evaluating 32 lineup combinations per team...');
-TEAM_RESULTS = [];
-const teams = Object.keys(PREDICTIONS.teams || {});
-for (const abbr of teams) {
-  const teamData = PREDICTIONS.teams[abbr];
-  const starterMap = teamData.starters || {};
+runProjections = async function() {
+  setStatus('Evaluating 32 lineup combinations per team...');
+  TEAM_RESULTS = [];
+  const teams = Object.keys(PREDICTIONS.teams || {});
+  for (const abbr of teams) {
+    const teamData = PREDICTIONS.teams[abbr];
+    const starterMap = teamData.starters || {};
   const benchMap = teamData.bench || {};
   const benchRank2 = {}, benchRank3 = {};
   for (const pos of POSITIONS_ORDER) {
@@ -2512,19 +2526,12 @@ for (const abbr of teams) {
   // Falls back to the raw value if the combo pool wasn't available
   // (e.g. incomplete bench) since there's no mean to shrink toward.
   if (comboMeans) {
-    const shrunkOrtg = comboMeans.comboMeanOrtg + SHRINKAGE_RETENTION * (startResult.ortg - comboMeans.comboMeanOrtg);
-    const shrunkDrtg = comboMeans.comboMeanDrtg + SHRINKAGE_RETENTION * (startResult.drtg - comboMeans.comboMeanDrtg);
-    if (abbr === 'NYK') {
-      console.log('[SHRINK DEBUG] NYK starters raw netrtg:', startResult.netrtg,
-        '| comboMeanOrtg:', comboMeans.comboMeanOrtg.toFixed(2), '| comboMeanDrtg:', comboMeans.comboMeanDrtg.toFixed(2),
-        '| shrunk netrtg will be:', Math.round((shrunkOrtg-shrunkDrtg)*10)/10);
-    }
+    const shrunkOrtg = comboMeans.comboMeanOrtg + SETTINGS.shrinkageRetention * (startResult.ortg - comboMeans.comboMeanOrtg);
+    const shrunkDrtg = comboMeans.comboMeanDrtg + SETTINGS.shrinkageRetention * (startResult.drtg - comboMeans.comboMeanDrtg);
     startResult.rawOrtg = startResult.ortg; startResult.rawDrtg = startResult.drtg; startResult.rawNetrtg = startResult.netrtg;
     startResult.ortg = Math.round(shrunkOrtg*10)/10;
     startResult.drtg = Math.round(shrunkDrtg*10)/10;
     startResult.netrtg = Math.round((shrunkOrtg-shrunkDrtg)*10)/10;
-  } else if (abbr === 'NYK') {
-    console.log('[SHRINK DEBUG] NYK: comboMeans is null/falsy -- shrinkage skipped entirely');
   }
 
   const nUsed = top20 ? Math.min(20, top20.length) : 0;
@@ -2562,9 +2569,8 @@ for (const abbr of teams) {
   // 2), directly and predictably reduces a stacked roster's relative
   // standing regardless of how the weighted blend distributes across
   // combos.
-  const TEAM_STACKING_RATE = 1.75;
   const teamStrongCount = startResult.strongCount || 0;
-  const teamStackingPenalty = TEAM_STACKING_RATE * Math.max(0, teamStrongCount - 2);
+  const teamStackingPenalty = SETTINGS.teamStackingRate * Math.max(0, teamStrongCount - 2);
   if (teamStackingPenalty > 0) {
     blended.ortg = Math.round((blended.ortg - teamStackingPenalty/2) * 10) / 10;
     blended.drtg = Math.round((blended.drtg + teamStackingPenalty/2) * 10) / 10;
@@ -2595,13 +2601,6 @@ for (const abbr of teams) {
 {
   const valid = TEAM_RESULTS.filter(t => !t.error);
   const shift = valid.reduce((s,t) => s + t.netrtg, 0) / valid.length;
-  const nykBefore = valid.find(t => t.abbr === 'NYK');
-  console.log('[RECENTER DEBUG] league-wide shift:', shift.toFixed(3), '| NYK netrtg BEFORE recentering:', nykBefore ? nykBefore.netrtg : 'not found');
-  const sorted = [...valid].sort((a,b) => a.netrtg - b.netrtg);
-  console.log('[LEAGUE DEBUG] all 30 teams pre-recentering netrtg, sorted:',
-    sorted.map(t => `${t.abbr}:${t.netrtg}`).join(' | '));
-  const errored = TEAM_RESULTS.filter(t => t.error);
-  console.log('[LEAGUE DEBUG] teams with errors (excluded from average):', errored.length, errored.map(t=>`${t.abbr}(${t.error})`));
   const recenter = (obj) => {
     obj.ortg = Math.round((obj.ortg - shift/2) * 10) / 10;
     obj.drtg = Math.round((obj.drtg + shift/2) * 10) / 10;
@@ -2612,19 +2611,20 @@ for (const abbr of teams) {
     recenter(t.starters);
     if (t.top10) for (const combo of t.top10) recenter(combo.result);
   }
-  const nykAfter = valid.find(t => t.abbr === 'NYK');
-  console.log('[RECENTER DEBUG] NYK netrtg AFTER recentering:', nykAfter ? nykAfter.netrtg : 'not found');
   const teamNetrtgMap = {};
   for (const t of valid) teamNetrtgMap[t.abbr] = t.netrtg;
   const seasonRecords = simulateSeasonRecords(teamNetrtgMap);
   for (const t of valid) t.record = seasonRecords[t.abbr];
-}
+  }
 
-    loading.style.display = 'none';
-    document.getElementById('statsBar').style.display = 'grid';
-    document.getElementById('controls').style.display = 'flex';
-    renderStats();
-    renderGrid();
+  loading.style.display = 'none';
+  document.getElementById('statsBar').style.display = 'grid';
+  document.getElementById('controls').style.display = 'flex';
+  renderStats();
+  renderGrid();
+};
+
+    await runProjections();
   } catch (err) {
     console.error('[Projections]', err);
     loading.style.display = 'none';
@@ -2711,6 +2711,101 @@ document.getElementById('sortSelect').addEventListener('change', renderGrid);
 document.getElementById('refreshBtn').addEventListener('click', boot);
 document.getElementById('detailOverlay').addEventListener('click', (e) => {
   if (e.target === e.currentTarget) closeDetail();
+});
+
+// Tune Model panel: lets the user adjust the model's key judgment-call
+// parameters directly and see all 30 teams recompute live, rather than
+// going back and forth over chat for every calibration tweak. Each
+// slider updates SETTINGS and triggers a debounced recompute -- debounced
+// because dragging fires many events per second, and re-running all 30
+// teams (243 combos each) on every tick would be wasteful; per-player
+// SQL lookups stay cached, so only the arithmetic re-runs, keeping this
+// fast even without the debounce, but there's no reason to recompute
+// mid-drag.
+const TUNE_SCHEMA = [
+  { key: 'teamStackingRate', label: 'Star-Stacking Penalty', min: 0, max: 4, step: 0.25,
+    desc: 'Points deducted per individually-strong starter beyond the first 2. Higher = more skeptical of rosters with several great players stacked at once.' },
+  { key: 'shrinkageRetention', label: 'Search Confidence', min: 0, max: 1, step: 0.05,
+    desc: 'How much of the single best-scoring lineup combo to trust vs. pull toward the average of all combos generated for that team. Lower = more correction for search-selection bias ("winner\'s curse").' },
+  { key: 'fitWeight', label: 'Lineup Fit Weight', min: 0, max: 1, step: 0.05,
+    desc: 'How much a lineup\'s shooting/rebounding/rim-protection/playmaking composition affects rating, on top of individual player talent.' },
+  { key: 'homeAdvantage', label: 'Home Court Advantage', min: 0, max: 6, step: 0.5,
+    desc: 'Point bonus for the home team in the season-simulation win-probability model. 3.0 matches real NBA history (~60% home win rate for evenly-matched teams).' },
+  { key: 'rookieDiscountMax', label: 'Rookie Uncertainty (max)', min: 0, max: 6, step: 0.5,
+    desc: 'Largest discount applied to a combo including a true rookie -- scaled down for higher draft picks, this is the ceiling for the latest picks.' },
+  { key: 'sampleDiscountMax', label: 'Thin-Sample Uncertainty (max)', min: 0, max: 6, step: 0.5,
+    desc: 'Largest discount applied to a combo including a non-rookie with under ~250 career games -- tapers to zero as career games increase.' },
+];
+
+function renderTunePanel() {
+  const panel = document.getElementById('tunePanel');
+  panel.innerHTML = `
+    <div class="tune-panel-inner">
+      <div class="tune-panel-header">
+        <div>
+          <h3>Tune Model</h3>
+          <p>Adjust these directly and every team recomputes live -- no redeploy needed.</p>
+        </div>
+        <button class="tune-reset" id="tuneResetBtn">Reset to defaults</button>
+      </div>
+      <div class="tune-grid">
+        ${TUNE_SCHEMA.map(s => `
+          <div class="tune-row">
+            <label for="tune_${s.key}">${s.label}</label>
+            <div class="tune-desc">${s.desc}</div>
+            <div class="tune-value-row">
+              <input type="range" id="tune_${s.key}" min="${s.min}" max="${s.max}" step="${s.step}" value="${SETTINGS[s.key]}">
+              <span class="tune-value" id="tune_${s.key}_val">${SETTINGS[s.key]}</span>
+            </div>
+          </div>
+        `).join('')}
+      </div>
+      <div class="tune-status" id="tuneStatus"></div>
+    </div>
+  `;
+
+  let debounceTimer = null;
+  const triggerRecompute = () => {
+    clearTimeout(debounceTimer);
+    const statusEl = document.getElementById('tuneStatus');
+    statusEl.textContent = 'Recalculating...';
+    debounceTimer = setTimeout(async () => {
+      if (runProjections) {
+        await runProjections();
+        statusEl.textContent = 'Updated just now.';
+      }
+    }, 400);
+  };
+
+  for (const s of TUNE_SCHEMA) {
+    const input = document.getElementById(`tune_${s.key}`);
+    const valEl = document.getElementById(`tune_${s.key}_val`);
+    input.addEventListener('input', () => {
+      const v = parseFloat(input.value);
+      SETTINGS[s.key] = v;
+      valEl.textContent = v;
+      triggerRecompute();
+    });
+  }
+
+  document.getElementById('tuneResetBtn').addEventListener('click', () => {
+    SETTINGS = { ...DEFAULT_SETTINGS };
+    renderTunePanel(); // rebuild sliders at reset positions
+    triggerRecompute();
+  });
+}
+
+document.getElementById('tuneBtn').addEventListener('click', () => {
+  const panel = document.getElementById('tunePanel');
+  const isOpen = panel.style.display !== 'none';
+  if (isOpen) {
+    panel.style.display = 'none';
+    document.getElementById('tuneBtn').classList.remove('active');
+  } else {
+    if (!panel.innerHTML.trim()) renderTunePanel();
+    panel.style.display = 'block';
+    document.getElementById('tuneBtn').classList.add('active');
+  }
 });
 
 function renderUnitRows(unit) {
