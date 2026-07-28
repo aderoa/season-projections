@@ -3022,6 +3022,7 @@ runProjections = async function() {
 };
 
     await runProjections();
+    detectAndLogRosterChanges();
   } catch (err) {
     console.error('[Projections]', err);
     loading.style.display = 'none';
@@ -3468,155 +3469,119 @@ document.getElementById('rankingsBtn').addEventListener('click', () => {
   }
 });
 
-// Projection Tracker: saves timestamped snapshots of all 30 teams'
-// projections to localStorage -- appropriate here since this is a
-// standalone hosted web app (deployed via Cloudflare/GitHub Pages), not
-// a Claude artifact, so localStorage persists correctly across reloads
-// on the same browser. Lets the user save a snapshot before a roster
-// move (a signing, a trade), then compare it against current
-// projections after refreshing, to see exactly how that move shifted
-// each team's numbers rather than just eyeballing two separate views.
-const TRACKER_STORAGE_KEY = 'hoopsmatic_predictions_snapshots';
-const TRACKER_MAX_SNAPSHOTS = 30;
+// Projection Tracker: automatically detects roster changes by comparing
+// the current depth chart data (PREDICTIONS.teams) against whatever was
+// there on the last load, rather than requiring the user to manually
+// save a snapshot before every roster move. Reading directly from the
+// source is simpler and can't be forgotten -- a real signing/trade
+// shows up automatically the next time the page loads or Refresh is
+// clicked, with the resulting projection impact logged alongside it.
+// Uses localStorage for persistence (appropriate here since this is a
+// standalone hosted web app, not a Claude artifact).
+const TRACKER_BASELINE_KEY = 'hoopsmatic_roster_baseline';
+const TRACKER_LOG_KEY = 'hoopsmatic_roster_change_log';
+const TRACKER_MAX_LOG_ENTRIES = 100;
 
-function loadSnapshots() {
-  try {
-    const raw = localStorage.getItem(TRACKER_STORAGE_KEY);
-    return raw ? JSON.parse(raw) : [];
-  } catch (e) {
-    console.warn('[Tracker] Failed to load snapshots:', e);
-    return [];
+function buildRosterFingerprint() {
+  const fp = {};
+  if (!PREDICTIONS || !PREDICTIONS.teams) return fp;
+  for (const [abbr, teamData] of Object.entries(PREDICTIONS.teams)) {
+    const names = new Set();
+    for (const n of Object.values(teamData.starters || {})) if (n) names.add(n);
+    for (const arr of Object.values(teamData.bench || {})) for (const n of (arr || [])) if (n) names.add(n);
+    fp[abbr] = [...names].sort();
   }
+  return fp;
 }
 
-function saveSnapshotsToStorage(snapshots) {
-  try {
-    localStorage.setItem(TRACKER_STORAGE_KEY, JSON.stringify(snapshots));
-    return true;
-  } catch (e) {
-    console.warn('[Tracker] Failed to save snapshots:', e);
-    return false;
-  }
+function loadJSON(key, fallback) {
+  try { const raw = localStorage.getItem(key); return raw ? JSON.parse(raw) : fallback; }
+  catch (e) { console.warn(`[Tracker] Failed to load ${key}:`, e); return fallback; }
+}
+function saveJSON(key, value) {
+  try { localStorage.setItem(key, JSON.stringify(value)); return true; }
+  catch (e) { console.warn(`[Tracker] Failed to save ${key}:`, e); return false; }
 }
 
-function captureCurrentSnapshot(label) {
+// Called once per real data load (boot()), never on slider-triggered
+// recomputes -- the roster data itself doesn't change when a slider
+// moves, only the computed numbers do, so comparing fingerprints there
+// would just be comparing identical rosters against themselves.
+function detectAndLogRosterChanges() {
+  const newFp = buildRosterFingerprint();
   const valid = TEAM_RESULTS.filter(t => !t.error);
-  const teams = {};
-  for (const t of valid) {
-    teams[t.abbr] = { wins: t.record.wins, losses: t.record.losses, netrtg: t.netrtg, starters: t.names };
-  }
-  return {
-    id: Date.now(),
-    label: label || `Snapshot ${new Date().toLocaleString()}`,
-    timestamp: new Date().toISOString(),
-    teams,
-  };
-}
+  const newProj = {};
+  for (const t of valid) newProj[t.abbr] = { wins: t.record.wins, losses: t.record.losses, netrtg: t.netrtg };
 
-function renderComparison(snap, resultEl) {
-  const valid = TEAM_RESULTS.filter(t => !t.error);
-  const rows = valid.map(t => {
-    const old = snap.teams[t.abbr];
-    if (!old) return null;
-    const winDelta = t.record.wins - old.wins;
-    const netrtgDelta = t.netrtg - old.netrtg;
-    if (Math.abs(winDelta) < 1 && Math.abs(netrtgDelta) < 0.1) return null; // skip unchanged teams
-    return { abbr: t.abbr, old, current: t, winDelta, netrtgDelta };
-  }).filter(Boolean).sort((a,b) => Math.abs(b.netrtgDelta) - Math.abs(a.netrtgDelta));
-
-  if (!rows.length) {
-    resultEl.innerHTML = '<div class="tune-status">No meaningful changes detected for any team since this snapshot.</div>';
-    return;
+  const baseline = loadJSON(TRACKER_BASELINE_KEY, null);
+  if (baseline) {
+    const log = loadJSON(TRACKER_LOG_KEY, []);
+    const now = new Date().toISOString();
+    for (const abbr of Object.keys(newFp)) {
+      const oldNames = new Set(baseline.fingerprints[abbr] || []);
+      const newNames = new Set(newFp[abbr] || []);
+      const added = [...newNames].filter(n => !oldNames.has(n));
+      const removed = [...oldNames].filter(n => !newNames.has(n));
+      if (added.length || removed.length) {
+        log.push({
+          timestamp: now, abbr, added, removed,
+          before: baseline.projections[abbr] || null,
+          after: newProj[abbr] || null,
+        });
+      }
+    }
+    while (log.length > TRACKER_MAX_LOG_ENTRIES) log.shift();
+    saveJSON(TRACKER_LOG_KEY, log);
   }
 
-  resultEl.innerHTML = `
-    <table class="standings-table" style="margin-top:0.8rem;">
-      <thead><tr><th>Team</th><th>Record</th><th>NetRtg</th><th>Change</th></tr></thead>
-      <tbody>
-        ${rows.map(r => `
-          <tr>
-            <td class="team-cell">${r.abbr}</td>
-            <td>${r.old.wins}-${r.old.losses} &rarr; ${r.current.record.wins}-${r.current.record.losses}</td>
-            <td>${r.old.netrtg>=0?'+':''}${r.old.netrtg.toFixed(1)} &rarr; ${r.current.netrtg>=0?'+':''}${r.current.netrtg.toFixed(1)}</td>
-            <td style="color:${r.netrtgDelta>=0?'#15803d':'#b91c1c'};font-weight:700;">${r.netrtgDelta>=0?'+':''}${r.netrtgDelta.toFixed(1)} (${r.winDelta>=0?'+':''}${r.winDelta}W)</td>
-          </tr>
-        `).join('')}
-      </tbody>
-    </table>
-  `;
+  saveJSON(TRACKER_BASELINE_KEY, { fingerprints: newFp, projections: newProj, timestamp: new Date().toISOString() });
 }
 
 function renderTrackerPanel() {
   const panel = document.getElementById('trackerPanel');
-  const snapshots = loadSnapshots();
+  const log = loadJSON(TRACKER_LOG_KEY, []);
+  const baseline = loadJSON(TRACKER_BASELINE_KEY, null);
+
+  const entriesHtml = log.length ? log.slice().reverse().map(e => {
+    const netrtgDelta = (e.after && e.before) ? e.after.netrtg - e.before.netrtg : null;
+    const winDelta = (e.after && e.before) ? e.after.wins - e.before.wins : null;
+    return `
+      <div class="tracker-item" style="flex-direction:column;align-items:flex-start;gap:0.35rem;">
+        <div style="display:flex;width:100%;align-items:center;gap:0.6rem;">
+          <span class="team-cell" style="font-weight:700;">${e.abbr}</span>
+          <span class="tracker-item-date">${new Date(e.timestamp).toLocaleString()}</span>
+        </div>
+        ${e.added.length ? `<div style="color:#15803d;font-size:0.78rem;">+ Added: ${e.added.join(', ')}</div>` : ''}
+        ${e.removed.length ? `<div style="color:#b91c1c;font-size:0.78rem;">&minus; Removed: ${e.removed.join(', ')}</div>` : ''}
+        ${e.before && e.after ? `<div style="font-family:'JetBrains Mono',monospace;font-size:0.78rem;">
+          ${e.before.wins}-${e.before.losses} (${e.before.netrtg>=0?'+':''}${e.before.netrtg.toFixed(1)}) &rarr;
+          ${e.after.wins}-${e.after.losses} (${e.after.netrtg>=0?'+':''}${e.after.netrtg.toFixed(1)})
+          <span style="color:${netrtgDelta>=0?'#15803d':'#b91c1c'};font-weight:700;">
+            (${netrtgDelta>=0?'+':''}${netrtgDelta.toFixed(1)} NetRtg, ${winDelta>=0?'+':''}${winDelta}W)
+          </span>
+        </div>` : '<div class="tune-status">No prior projection to compare against for this change.</div>'}
+      </div>
+    `;
+  }).join('') : '<div class="tune-status">No roster changes detected yet. This log fills in automatically the next time the depth chart changes and the page reloads or Refresh is clicked.</div>';
 
   panel.innerHTML = `
     <div class="tune-panel-inner">
       <div class="tune-panel-header">
         <div>
           <h3>Projection Tracker</h3>
-          <p>Save a snapshot before a roster move, then compare it against current projections after refreshing to see exactly what changed.</p>
+          <p>Automatically detects roster changes by comparing the depth chart against what was there last time -- no manual snapshotting needed. A signing or trade shows up here the next time the page loads, with the resulting projection impact.</p>
         </div>
+        <button class="tune-reset" id="clearLogBtn">Clear log</button>
       </div>
-      <div class="tracker-save-row">
-        <input type="text" id="snapshotLabelInput" placeholder="Label (e.g. 'Before Giannis trade')">
-        <button class="ctrl-btn" id="saveSnapshotBtn">📸 Save Current Snapshot</button>
-      </div>
-      <div class="tune-status" id="trackerStatus"></div>
-      ${snapshots.length ? `
-        <div class="tracker-compare-row">
-          <label>Compare current projections against:</label>
-          <select id="compareSelect">
-            <option value="">-- Select a snapshot --</option>
-            ${snapshots.slice().reverse().map(s => `<option value="${s.id}">${s.label} (${new Date(s.timestamp).toLocaleString()})</option>`).join('')}
-          </select>
-        </div>
-        <div id="compareResult"></div>
-        <div class="tracker-list">
-          <div class="section-label" style="margin-top:1.2rem;">Saved Snapshots</div>
-          ${snapshots.slice().reverse().map(s => `
-            <div class="tracker-item">
-              <span>${s.label}</span>
-              <span class="tracker-item-date">${new Date(s.timestamp).toLocaleString()}</span>
-              <button class="tracker-delete" data-id="${s.id}">✕</button>
-            </div>
-          `).join('')}
-        </div>
-      ` : '<div class="tune-status">No snapshots saved yet.</div>'}
+      ${baseline ? `<div class="tune-status">Currently tracking ${Object.keys(baseline.fingerprints).length} teams, last updated ${new Date(baseline.timestamp).toLocaleString()}.</div>` : ''}
+      <div class="tracker-list" style="margin-top:1rem;">${entriesHtml}</div>
     </div>
   `;
 
-  document.getElementById('saveSnapshotBtn').addEventListener('click', () => {
-    const label = document.getElementById('snapshotLabelInput').value.trim();
-    const snap = captureCurrentSnapshot(label);
-    const all = loadSnapshots();
-    all.push(snap);
-    while (all.length > TRACKER_MAX_SNAPSHOTS) all.shift();
-    const ok = saveSnapshotsToStorage(all);
-    document.getElementById('trackerStatus').textContent = ok ? `Saved "${snap.label}".` : 'Failed to save -- browser storage may be full or unavailable.';
+  const clearBtn = document.getElementById('clearLogBtn');
+  if (clearBtn) clearBtn.addEventListener('click', () => {
+    saveJSON(TRACKER_LOG_KEY, []);
     renderTrackerPanel();
-  });
-
-  const compareSelect = document.getElementById('compareSelect');
-  if (compareSelect) {
-    compareSelect.addEventListener('change', () => {
-      const id = parseFloat(compareSelect.value);
-      const resultEl = document.getElementById('compareResult');
-      if (!id) { resultEl.innerHTML = ''; return; }
-      const snap = snapshots.find(s => s.id === id);
-      if (!snap) return;
-      renderComparison(snap, resultEl);
-    });
-  }
-
-  panel.querySelectorAll('.tracker-delete').forEach(btn => {
-    btn.addEventListener('click', (e) => {
-      e.stopPropagation();
-      const id = parseFloat(btn.dataset.id);
-      const all = loadSnapshots().filter(s => s.id !== id);
-      saveSnapshotsToStorage(all);
-      renderTrackerPanel();
-    });
   });
 }
 
