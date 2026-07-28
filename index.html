@@ -3488,7 +3488,18 @@ function buildRosterFingerprint() {
   for (const [abbr, teamData] of Object.entries(PREDICTIONS.teams)) {
     const names = new Set();
     for (const n of Object.values(teamData.starters || {})) if (n) names.add(n);
-    for (const arr of Object.values(teamData.bench || {})) for (const n of (arr || [])) if (n) names.add(n);
+    // Only the first two bench entries per position -- matching exactly
+    // what projectLineup/runProjections actually use (benchRank2 = index
+    // 0, benchRank3 = index 1). Anything beyond that in the raw depth
+    // chart data (e.g. a team-affiliated free agent sitting further down
+    // the list) has zero effect on the projection, so including it here
+    // would mean moving them into an actually-used slot later doesn't
+    // register as a fingerprint change even though the real projection
+    // changed -- confirmed directly, this is exactly what happened with
+    // a real signing that the tracker missed.
+    for (const arr of Object.values(teamData.bench || {})) {
+      (arr || []).slice(0, 2).forEach(n => { if (n) names.add(n); });
+    }
     fp[abbr] = [...names].sort();
   }
   return fp;
@@ -3514,10 +3525,7 @@ function detectAndLogRosterChanges() {
   for (const t of valid) newProj[t.abbr] = { wins: t.record.wins, losses: t.record.losses, netrtg: t.netrtg };
 
   const baseline = loadJSON(TRACKER_BASELINE_KEY, null);
-  console.log('[Tracker] baseline exists:', !!baseline, baseline ? 'from ' + baseline.timestamp : '(this load will establish the initial baseline)');
   if (baseline) {
-    console.log('[Tracker] GSW baseline roster:', baseline.fingerprints['GSW']);
-    console.log('[Tracker] GSW current roster:', newFp['GSW']);
     const log = loadJSON(TRACKER_LOG_KEY, []);
     const now = new Date().toISOString();
     for (const abbr of Object.keys(newFp)) {
@@ -3533,7 +3541,6 @@ function detectAndLogRosterChanges() {
         });
       }
     }
-    console.log('[Tracker] total log entries after this pass:', log.length);
     while (log.length > TRACKER_MAX_LOG_ENTRIES) log.shift();
     saveJSON(TRACKER_LOG_KEY, log);
   }
