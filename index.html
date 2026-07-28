@@ -3514,7 +3514,10 @@ function detectAndLogRosterChanges() {
   for (const t of valid) newProj[t.abbr] = { wins: t.record.wins, losses: t.record.losses, netrtg: t.netrtg };
 
   const baseline = loadJSON(TRACKER_BASELINE_KEY, null);
+  console.log('[Tracker] baseline exists:', !!baseline, baseline ? 'from ' + baseline.timestamp : '(this load will establish the initial baseline)');
   if (baseline) {
+    console.log('[Tracker] GSW baseline roster:', baseline.fingerprints['GSW']);
+    console.log('[Tracker] GSW current roster:', newFp['GSW']);
     const log = loadJSON(TRACKER_LOG_KEY, []);
     const now = new Date().toISOString();
     for (const abbr of Object.keys(newFp)) {
@@ -3530,6 +3533,7 @@ function detectAndLogRosterChanges() {
         });
       }
     }
+    console.log('[Tracker] total log entries after this pass:', log.length);
     while (log.length > TRACKER_MAX_LOG_ENTRIES) log.shift();
     saveJSON(TRACKER_LOG_KEY, log);
   }
