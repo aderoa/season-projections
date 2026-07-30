@@ -3694,38 +3694,62 @@ function detectAndLogRosterChanges() {
   const valid = TEAM_RESULTS.filter(t => !t.error);
   const newProj = {};
   for (const t of valid) newProj[t.abbr] = { wins: t.record.wins, losses: t.record.losses, netrtg: t.netrtg };
+  // Availability of everyone the projection can actually field, per team, so a
+  // change in health can be named as the cause of a change in record.
+  const newAvail = {};
+  for (const [abbr, td] of Object.entries(PREDICTIONS.teams || {})) {
+    const m = {};
+    for (const n of Object.values(td.starters || {})) if (n) m[n] = playerAvailability(n);
+    for (const arr of Object.values(td.bench || {}))
+      (arr || []).slice(0, 2).forEach(n => { if (n) m[n] = playerAvailability(n); });
+    newAvail[abbr] = m;
+  }
 
   const baseline = loadJSON(TRACKER_BASELINE_KEY, null);
   if (baseline) {
     const log = loadJSON(TRACKER_LOG_KEY, []);
     const now = new Date().toISOString();
-    for (const abbr of Object.keys(newFp)) {
+    // The projection moving is the thing worth logging -- a roster edit that
+    // changes nothing is noise, and an injury that costs six wins matters even
+    // though no roster slot moved. So the record is the trigger; the roster
+    // and availability diffs are the explanation attached to it.
+    for (const abbr of Object.keys(newProj)) {
+      const before = (baseline.projections || {})[abbr];
+      const after = newProj[abbr];
+      if (!before || !after) continue;
+      const winDelta = after.wins - before.wins;
+      const rtgDelta = Math.round((after.netrtg - before.netrtg) * 10) / 10;
+      if (winDelta === 0 && Math.abs(rtgDelta) < 0.1) continue;
+
       const prev = baseline.fingerprints[abbr];
-      let added, removed, moved;
+      let added = [], removed = [], moved = [];
       if (Array.isArray(prev)) {
-        // Baseline written by the old name-set format: fall back to a
-        // membership diff for this one load, then it stores slots.
         const oldNames = new Set(prev);
         const newNames = new Set(Object.values(newFp[abbr] || {}).filter(Boolean));
         added = [...newNames].filter(n => !oldNames.has(n));
         removed = [...oldNames].filter(n => !newNames.has(n));
-        moved = [];
-      } else {
+      } else if (prev) {
         ({ added, removed, moved } = diffSlots(prev, newFp[abbr]));
       }
-      if (added.length || removed.length || moved.length) {
-        log.push({
-          timestamp: now, abbr, added, removed, moved,
-          before: (baseline.projections || {})[abbr] || null,
-          after: newProj[abbr] || null,
-        });
+      const oldAv = (baseline.availability || {})[abbr] || {};
+      const newAv = newAvail[abbr] || {};
+      const injuries = [];
+      for (const n of new Set([...Object.keys(oldAv), ...Object.keys(newAv)])) {
+        const a = oldAv[n] == null ? 1 : oldAv[n];
+        const b = newAv[n] == null ? 1 : newAv[n];
+        if (Math.abs(a - b) > 0.02) injuries.push({ name: n, from: a, to: b });
       }
+      injuries.sort((x, y) => (x.to - x.from) - (y.to - y.from));
+      log.push({ timestamp: now, abbr, added, removed, moved, injuries,
+                 before, after, winDelta, rtgDelta });
     }
+    log.sort((a, b) => Math.abs(b.winDelta) - Math.abs(a.winDelta));
     while (log.length > TRACKER_MAX_LOG_ENTRIES) log.shift();
     saveJSON(TRACKER_LOG_KEY, log);
   }
 
-  saveJSON(TRACKER_BASELINE_KEY, { fingerprints: newFp, projections: newProj, timestamp: new Date().toISOString() });
+  saveJSON(TRACKER_BASELINE_KEY, { fingerprints: newFp, projections: newProj,
+    availability: newAvail, timestamp: new Date().toISOString() });
 }
 
 function renderTrackerPanel() {
@@ -3745,6 +3769,8 @@ function renderTrackerPanel() {
         ${e.added.length ? `<div style="color:#15803d;font-size:0.78rem;">+ Added: ${e.added.join(', ')}</div>` : ''}
         ${e.removed.length ? `<div style="color:#b91c1c;font-size:0.78rem;">&minus; Removed: ${e.removed.join(', ')}</div>` : ''}
         ${(e.moved || []).length ? `<div style="color:#b45309;font-size:0.78rem;">&#8646; Moved: ${e.moved.map(m => `${m.name} (${slotLabel(m.from)} &rarr; ${slotLabel(m.to)})`).join(', ')}</div>` : ''}
+        ${(e.injuries || []).length ? `<div style="color:#b91c1c;font-size:0.78rem;">&#9877; Availability: ${e.injuries.map(i => `${i.name} ${Math.round(i.from*100)}%&rarr;${Math.round(i.to*100)}%`).join(', ')}</div>` : ''}
+        ${(!e.added.length && !e.removed.length && !(e.moved||[]).length && !(e.injuries||[]).length) ? `<div style="color:var(--text-muted);font-size:0.78rem;">No roster or availability change &mdash; ratings or data refresh</div>` : ''}
         ${e.before && e.after ? `<div style="font-family:'JetBrains Mono',monospace;font-size:0.78rem;">
           ${e.before.wins}-${e.before.losses} (${e.before.netrtg>=0?'+':''}${e.before.netrtg.toFixed(1)}) &rarr;
           ${e.after.wins}-${e.after.losses} (${e.after.netrtg>=0?'+':''}${e.after.netrtg.toFixed(1)})
