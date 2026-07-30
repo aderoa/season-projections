@@ -3482,27 +3482,51 @@ const TRACKER_BASELINE_KEY = 'hoopsmatic_roster_baseline';
 const TRACKER_LOG_KEY = 'hoopsmatic_roster_change_log';
 const TRACKER_MAX_LOG_ENTRIES = 100;
 
+// Fingerprint by SLOT, not by membership. The projection runs the starting
+// five, the second unit and the third unit as separate lineups, and position
+// matters inside each -- so promoting a backup over a starter, or swapping
+// two backups across positions, changes the projected record while leaving
+// the set of names identical. A name-set fingerprint is blind to exactly
+// those edits, which is why real depth-chart moves moved the records but
+// never reached the log. Slots covered are precisely the ones runProjections
+// consumes: starter, bench index 0 and bench index 1, per position.
 function buildRosterFingerprint() {
   const fp = {};
   if (!PREDICTIONS || !PREDICTIONS.teams) return fp;
   for (const [abbr, teamData] of Object.entries(PREDICTIONS.teams)) {
-    const names = new Set();
-    for (const n of Object.values(teamData.starters || {})) if (n) names.add(n);
-    // Only the first two bench entries per position -- matching exactly
-    // what projectLineup/runProjections actually use (benchRank2 = index
-    // 0, benchRank3 = index 1). Anything beyond that in the raw depth
-    // chart data (e.g. a team-affiliated free agent sitting further down
-    // the list) has zero effect on the projection, so including it here
-    // would mean moving them into an actually-used slot later doesn't
-    // register as a fingerprint change even though the real projection
-    // changed -- confirmed directly, this is exactly what happened with
-    // a real signing that the tracker missed.
-    for (const arr of Object.values(teamData.bench || {})) {
-      (arr || []).slice(0, 2).forEach(n => { if (n) names.add(n); });
+    const slots = {};
+    const starters = teamData.starters || {};
+    const bench = teamData.bench || {};
+    for (const pos of POSITIONS_ORDER) {
+      const b = bench[pos] || [];
+      slots[pos + '1'] = starters[pos] || null;
+      slots[pos + '2'] = b[0] || null;
+      slots[pos + '3'] = b[1] || null;
     }
-    fp[abbr] = [...names].sort();
+    fp[abbr] = slots;
   }
   return fp;
+}
+
+const SLOT_TIER = { '1': 'starter', '2': '2nd unit', '3': '3rd unit' };
+function slotLabel(key) {
+  if (!key) return '?';
+  return key.slice(0, -1) + ' ' + (SLOT_TIER[key.slice(-1)] || key.slice(-1));
+}
+
+// Compares two slot maps and reports names arriving, names leaving, and
+// names that stayed but changed slot.
+function diffSlots(oldSlots, newSlots) {
+  const oldBy = new Map(), newBy = new Map();
+  for (const [k, v] of Object.entries(oldSlots || {})) if (v) oldBy.set(v, k);
+  for (const [k, v] of Object.entries(newSlots || {})) if (v) newBy.set(v, k);
+  const added = [], removed = [], moved = [];
+  for (const [name, slot] of newBy) {
+    if (!oldBy.has(name)) added.push(name);
+    else if (oldBy.get(name) !== slot) moved.push({ name, from: oldBy.get(name), to: slot });
+  }
+  for (const name of oldBy.keys()) if (!newBy.has(name)) removed.push(name);
+  return { added, removed, moved };
 }
 
 function loadJSON(key, fallback) {
@@ -3529,14 +3553,23 @@ function detectAndLogRosterChanges() {
     const log = loadJSON(TRACKER_LOG_KEY, []);
     const now = new Date().toISOString();
     for (const abbr of Object.keys(newFp)) {
-      const oldNames = new Set(baseline.fingerprints[abbr] || []);
-      const newNames = new Set(newFp[abbr] || []);
-      const added = [...newNames].filter(n => !oldNames.has(n));
-      const removed = [...oldNames].filter(n => !newNames.has(n));
-      if (added.length || removed.length) {
+      const prev = baseline.fingerprints[abbr];
+      let added, removed, moved;
+      if (Array.isArray(prev)) {
+        // Baseline written by the old name-set format: fall back to a
+        // membership diff for this one load, then it stores slots.
+        const oldNames = new Set(prev);
+        const newNames = new Set(Object.values(newFp[abbr] || {}).filter(Boolean));
+        added = [...newNames].filter(n => !oldNames.has(n));
+        removed = [...oldNames].filter(n => !newNames.has(n));
+        moved = [];
+      } else {
+        ({ added, removed, moved } = diffSlots(prev, newFp[abbr]));
+      }
+      if (added.length || removed.length || moved.length) {
         log.push({
-          timestamp: now, abbr, added, removed,
-          before: baseline.projections[abbr] || null,
+          timestamp: now, abbr, added, removed, moved,
+          before: (baseline.projections || {})[abbr] || null,
           after: newProj[abbr] || null,
         });
       }
@@ -3564,6 +3597,7 @@ function renderTrackerPanel() {
         </div>
         ${e.added.length ? `<div style="color:#15803d;font-size:0.78rem;">+ Added: ${e.added.join(', ')}</div>` : ''}
         ${e.removed.length ? `<div style="color:#b91c1c;font-size:0.78rem;">&minus; Removed: ${e.removed.join(', ')}</div>` : ''}
+        ${(e.moved || []).length ? `<div style="color:#b45309;font-size:0.78rem;">&#8646; Moved: ${e.moved.map(m => `${m.name} (${slotLabel(m.from)} &rarr; ${slotLabel(m.to)})`).join(', ')}</div>` : ''}
         ${e.before && e.after ? `<div style="font-family:'JetBrains Mono',monospace;font-size:0.78rem;">
           ${e.before.wins}-${e.before.losses} (${e.before.netrtg>=0?'+':''}${e.before.netrtg.toFixed(1)}) &rarr;
           ${e.after.wins}-${e.after.losses} (${e.after.netrtg>=0?'+':''}${e.after.netrtg.toFixed(1)})
