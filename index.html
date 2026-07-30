@@ -2982,8 +2982,29 @@ runProjections = async function() {
   const teams = Object.keys(PREDICTIONS.teams || {});
   for (const abbr of teams) {
     const teamData = PREDICTIONS.teams[abbr];
-    const starterMap = teamData.starters || {};
-  const benchMap = teamData.bench || {};
+    const rawStarters = teamData.starters || {};
+  const rawBench = teamData.bench || {};
+  // Pull anyone who is out of the depth chart and let the position shift up,
+  // exactly as a coach would. Re-weighting the lineup combinations alone
+  // cannot handle it: when a starter AND his backup are both out -- Butler
+  // and Moody at Golden State's small forward -- every combination scores
+  // zero availability, the renormalise divides by nothing and the whole
+  // thing silently falls back to the healthy weights. Removing them first
+  // means the third-stringer is genuinely projected instead.
+  const OUT_CUTOFF = 0.25;
+  const starterMap = {}, benchMap = {};
+  const teamOut = [];
+  for (const pos of POSITIONS_ORDER) {
+    const queue = [rawStarters[pos], ...((rawBench[pos] || []))].filter(Boolean);
+    const fit = [];
+    for (const n of queue) {
+      if (INJURY_ON && playerAvailability(n) < OUT_CUTOFF) { teamOut.push(n); continue; }
+      fit.push(n);
+    }
+    starterMap[pos] = fit[0] || null;
+    benchMap[pos] = fit.slice(1);
+  }
+  if (teamOut.length) console.log('[Injuries] ' + abbr + ' unavailable: ' + teamOut.join(', '));
   const benchRank2 = {}, benchRank3 = {};
   for (const pos of POSITIONS_ORDER) {
     benchRank2[pos] = (benchMap[pos] || [])[0] || null;
